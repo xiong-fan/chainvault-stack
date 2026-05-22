@@ -5,6 +5,7 @@ import {
   CreditType,
   BusinessType,
   UserBalance,
+  UserBalanceStats,
   Credit
 } from '../db/models/credit';
 import { normalizeBigIntString } from '../utils/numberUtils';
@@ -40,6 +41,8 @@ export class BalanceService {
     // 转换为UserBalance格式
     return aggregatedBalances.map(balance => ({
       user_id: userId,
+      chain_id: balance.chain_id,
+      chain_type: balance.chain_type,
       address: '', // 聚合模式下不包含具体地址信息
       token_id: balance.token_id,
       token_symbol: balance.token_symbol,
@@ -57,6 +60,8 @@ export class BalanceService {
    * 获取用户各代币总余额（使用视图优化）
    */
   async getUserTotalBalancesByToken(userId: number): Promise<{
+    chain_id: number | null;
+    chain_type: string | null;
     token_symbol: string;
     total_balance: string;
     available_balance: string;
@@ -66,6 +71,12 @@ export class BalanceService {
     return await this.creditModel.getUserTotalBalancesByToken(userId);
   }
 
+  /**
+   * 获取用户余额统计概览
+   */
+  async getUserBalanceStats(userId: number): Promise<UserBalanceStats> {
+    return await this.creditModel.getUserBalanceStats(userId);
+  }
 
   /**
    * 获取用户余额变更历史
@@ -208,7 +219,7 @@ export class BalanceService {
   /**
    * 获取热钱包余额（从 Credits 表获取）
    */
-  async getWalletBalance(address: string, tokenId: number): Promise<string> {
+  async getWalletBalance(address: string, tokenId: number, chainId?: number): Promise<string> {
     try {
       // 从 Credits 表获取指定地址的余额
       const balances = await this.creditModel.getUserBalancesByAddress(address, tokenId);
@@ -217,7 +228,7 @@ export class BalanceService {
         return '0';
       }
 
-      const tokenBalance = balances.find(b => b.token_id === tokenId);
+      const tokenBalance = balances.find(b => b.token_id === tokenId && (chainId === undefined || b.chain_id === chainId));
       return tokenBalance ? normalizeBigIntString(tokenBalance.available_balance) : '0';
       
     } catch (error) {

@@ -1,3 +1,4 @@
+import './loadEnv';  // 加载 .env 环境变量
 import { scanService } from './services/scanService';
 import WithdrawMonitor from './services/withdrawMonitor';
 import { database } from './db/connection';
@@ -13,7 +14,7 @@ const withdrawMonitor = new WithdrawMonitor(database);
  */
 async function checkWalletAddresses(): Promise<void> {
   try {
-    logger.info('检查钱包地址...');
+    logger.debug('检查钱包地址...');
 
     // 初始化数据库连接
     await database.initialize();
@@ -33,7 +34,7 @@ async function checkWalletAddresses(): Promise<void> {
       );
     }
 
-    logger.info('找到需要监控的钱包地址', {
+    logger.debug('找到需要监控的钱包地址', {
       totalWallets: wallets.length,
       walletTypes: [...new Set(wallets.map((w: any) => w.wallet_type))],
       chainTypes: [...new Set(wallets.map((w: any) => w.chain_type))]
@@ -46,7 +47,7 @@ async function checkWalletAddresses(): Promise<void> {
       chain: w.chain_type
     }));
 
-    logger.info('钱包地址示例', { sampleAddresses });
+    logger.debug('钱包地址示例', { sampleAddresses });
 
   } catch (error: any) {
     logger.error('检查钱包地址失败', { error: error.message });
@@ -62,7 +63,7 @@ async function checkRiskControlConnection(): Promise<void> {
   const riskControlUrl = process.env.RISK_CONTROL_URL || 'http://localhost:3004';
 
   try {
-    logger.info('检查风控服务连接...', { riskControlUrl });
+    logger.debug('检查风控服务连接...', { riskControlUrl });
 
     const isHealthy = await riskControlClient.healthCheck();
 
@@ -70,7 +71,7 @@ async function checkRiskControlConnection(): Promise<void> {
       throw new Error('风控服务健康检查失败');
     }
 
-    logger.info('风控服务连接成功', { riskControlUrl });
+    logger.debug('风控服务连接成功', { riskControlUrl });
   } catch (error: any) {
     logger.error('无法连接到风控服务', {
       riskControlUrl,
@@ -89,11 +90,11 @@ async function checkRiskControlConnection(): Promise<void> {
  */
 async function initializeApp(): Promise<void> {
   try {
-    logger.info('正在初始化CEX钱包扫描器...', {
+    logger.debug('正在初始化CEX钱包扫描器...', {
       nodeVersion: process.version,
       platform: process.platform,
       config: {
-        ethRpcUrl: config.ethRpcUrl ? '***' : '未配置',
+        ethRpcUrl: config.ethRpcUrl ? config.ethRpcUrl : '未配置',
         databaseUrl: config.databaseUrl,
         confirmationBlocks: config.confirmationBlocks,
         scanInterval: config.scanInterval
@@ -108,30 +109,29 @@ async function initializeApp(): Promise<void> {
 
     // 自动启动扫描服务
     if (process.env.AUTO_START !== 'false') {
-      logger.info('自动启动扫描服务...');
       await scanService.start();
 
       // 启动提现监控器
-      logger.info('启动提现监控器...');
+      logger.debug('启动提现监控器...');
       await withdrawMonitor.start();
     } else {
-      logger.info('自动启动已禁用，需要手动启动扫描服务和提现监控器');
+      logger.debug('自动启动已禁用，需要手动启动扫描服务和提现监控器');
     }
 
-    logger.info('CEX钱包扫描器启动完成');
+    logger.debug('CEX钱包扫描器启动完成');
 
     // 关闭处理
     const gracefulShutdown = async (signal: string) => {
-      logger.info(`收到 ${signal} 信号，开始关闭...`);
+      logger.debug(`收到 ${signal} 信号，开始关闭...`);
 
       try {
         // 停止扫描服务
         await scanService.stop();
-        logger.info('扫描服务已停止');
+        logger.debug('扫描服务已停止');
         
         // 停止提现监控器
         await withdrawMonitor.stop();
-        logger.info('提现监控器已停止');
+        logger.debug('提现监控器已停止');
         
         process.exit(0);
       } catch (error) {

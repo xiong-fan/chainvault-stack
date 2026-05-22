@@ -1,4 +1,5 @@
-import 'dotenv/config';
+// import 'dotenv/config';
+import '../src/loadEnv';
 import { getDbGatewayClient } from '../src/services/dbGatewayClient';
 import { HotWalletService } from '../src/services/hotWalletService';
 import { getDatabase } from '../src/db/connection';
@@ -51,7 +52,7 @@ async function insertMockData() {
       logger.error('');
       logger.error('请确保 wallet 服务正在运行:');
       logger.error('  1. 打开新终端');
-      logger.error('  2. cd /Users/emmett/openspace_code/cex-wallet/wallet');
+      logger.error('  2. cd /Users/tangao/github_program/cex-wallet/wallet');
       logger.error('  3. npm run dev');
       logger.error('');
       process.exit(1);
@@ -183,13 +184,13 @@ async function insertMockData() {
         await dbGateway.createToken({
           chain_type: 'evm',
           chain_id: 31337,
-          token_address: '0x5fbdb2315678afecb367f032d93f642f64180aa3', // 统一使用小写
+          token_address: '0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519', // 统一使用小写
           token_symbol: 'OPS',
-          token_name: 'OPS',
+          token_name: 'OPS Token',
           token_type: 'erc20',
           decimals: 18,
           is_native: false,
-          collect_amount: '10000000000000000000',
+          collect_amount: '1000000000000000000',
           withdraw_fee: '2000000000000000000',
           min_withdraw_amount: '20000000000000000000',
           status: 1
@@ -213,13 +214,13 @@ async function insertMockData() {
         await dbGateway.createToken({
           chain_type: 'evm',
           chain_id: 31337,
-          token_address: '0xe7f1725e7734ce288f8367e1bb143e90bb3f0512', // 统一使用小写
+          token_address: '0x7FA9385bE102ac3EAc297483Dd6233D62b3e1496', // 统一使用小写
           token_symbol: 'USDT',
-          token_name: 'MockU',
+          token_name: 'Mock USDT',
           token_type: 'erc20',
           decimals: 18,
           is_native: false,
-          collect_amount: '10000000000000000000',
+          collect_amount: '1000000000000000000',
           withdraw_fee: '500000000000000000',
           min_withdraw_amount: '5000000000000000000',
           status: 1

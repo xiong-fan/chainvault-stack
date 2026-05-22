@@ -124,7 +124,7 @@ export class SolanaWithdrawMonitor {
         return;
       }
 
-      logger.info(`发现 ${pendingWithdraws.length} 条待确认的 Solana 提现交易`);
+      logger.debug(`发现 ${pendingWithdraws.length} 条待确认的 Solana 提现交易`);
 
       // 并发处理多个交易的状态检查
       const promises = pendingWithdraws.map(withdraw =>
@@ -182,7 +182,7 @@ export class SolanaWithdrawMonitor {
         return;
       }
 
-      logger.info(`发现 ${confirmedWithdraws.length} 条待最终确认的 Solana 提现交易`);
+      logger.debug(`发现 ${confirmedWithdraws.length} 条待最终确认的 Solana 提现交易`);
 
       // 并发处理多个交易的最终确认检查
       const promises = confirmedWithdraws.map(withdraw =>
@@ -231,7 +231,7 @@ export class SolanaWithdrawMonitor {
       const blockTime = transaction.blockTime ? Number(transaction.blockTime) : null;
       const isSuccess = !transaction.meta?.err;
 
-      logger.info('获取到 Solana 交易信息', {
+      logger.debug('获取到 Solana 交易信息', {
         withdrawId: id,
         txHash: tx_hash,
         slot: slot,

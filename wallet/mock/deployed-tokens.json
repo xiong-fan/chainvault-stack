@@ -1,21 +1,22 @@
 {
-  "payer": "6oLiQn73H8EWnbo5sSuFx1V4KNAasBgFP39puLR9Emaw",
+  "deployedAt": "2026-05-20T13:10:15.700Z",
+  "payer": "5eY3Di9JfGPDz4J87nLgkRsBb2RELfhN3Yc5Lh2Cosui",
   "tokens": [
     {
-      "symbol": "USDC",
-      "name": "USD Coin (Test)",
-      "mint": "uceu8rhVR3kXjF4da7ce5nzeY9zScNx3QEJ1QNJWMPr",
+      "symbol": "lUSDC",
+      "name": "Local USDC",
+      "mint": "GqsCFxb5sUYGBqgmkX3bguATMV9j9TAex7WBUPcoXejT",
       "decimals": 6,
-      "payerTokenAccount": "2diHjAWMSV6TcLrHqWxmqT1pHgXEw5RWwZe44mm3xXPg",
-      "tokenType": "spl-token"
+      "tokenType": "spl-token",
+      "ata": "FSsxtWK1UXz2ho1G97AiHb81ofwC1C2UmYY1DJhV3pAV"
     },
     {
-      "symbol": "USDT",
-      "name": "Tether USD (Test)",
-      "mint": "utSi6U6UhwaArZD88AJFDUCmoxk9ojU21PzCSrRCz3B",
+      "symbol": "lUSDT",
+      "name": "Local USDT",
+      "mint": "CG3BcE743FWzWjF5tNv4vkVTQZ2fo5PrJic8ick87rPj",
       "decimals": 6,
-      "payerTokenAccount": "HrdVFLELenJ2BeXAmLcaHCFBggB4X3v8w37T6AxG7oaB",
-      "tokenType": "spl-token-2022"
+      "tokenType": "spl-token-2022",
+      "ata": "J7sZuJbevDmjVVHaVGYr5J2rvYcENBoASYCySqyjMDwE"
     }
   ]
 }

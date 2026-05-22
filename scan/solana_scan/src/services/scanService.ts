@@ -47,10 +47,10 @@ export class ScanService {
 
       // 加载监控地址和代币信息
       await transactionParser.refreshCache();
-
+  
       // 启动区块扫描器
       await blockScanner.startScanning();
-
+  
       // 启动提现监控服务
       await this.withdrawMonitor.start();
 

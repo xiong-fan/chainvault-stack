@@ -1,14 +1,15 @@
+import './loadEnv';  // 加载 .env 环境变量
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
+// import dotenv from 'dotenv';
 import { RiskAssessmentService } from './services/risk-assessment';
 import { RiskController } from './controllers/risk';
 import { logger } from './utils/logger';
 import { Ed25519Signer } from './utils/crypto';
 
 // 加载环境变量
-dotenv.config();
+// dotenv.config();
 
 class RiskControlService {
   private app: express.Application;
@@ -51,9 +52,10 @@ class RiskControlService {
       origin: [
         'http://localhost:3001',  // wallet service
         'http://localhost:3002',  // scan service
-        'http://localhost:3003'   // db_gateway service
+        'http://localhost:3003',  // db_gateway service
+        'http://localhost:3009'   // user frontend
       ],
-      methods: ['GET', 'POST'],
+      methods: ['GET', 'POST', 'PATCH'],
       allowedHeaders: ['Content-Type', 'Authorization'],
       credentials: true
     }));
@@ -92,10 +94,52 @@ class RiskControlService {
     // 提现风险评估端点
     this.app.post('/api/withdraw-risk-assessment', this.riskController.withdrawRiskAssessment);
 
+    const requireRiskAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const configuredToken = process.env.RISK_ADMIN_TOKEN;
+      if (!configuredToken) {
+        if (process.env.NODE_ENV === 'production') {
+          return res.status(403).json({
+            success: false,
+            error: {
+              code: 'RISK_ADMIN_TOKEN_NOT_CONFIGURED',
+              message: 'Risk admin access is not configured'
+            }
+          });
+        }
+
+        logger.warn('RISK_ADMIN_TOKEN is not configured; allowing risk admin request in non-production mode', {
+          path: req.path,
+          method: req.method
+        });
+        return next();
+      }
+
+      const headerToken = req.get('x-risk-admin-token');
+      const bearerToken = req.get('authorization')?.replace(/^Bearer\s+/i, '');
+      if (headerToken === configuredToken || bearerToken === configuredToken) {
+        return next();
+      }
+
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Risk admin permission required'
+        }
+      });
+    };
+
     // 人工审核相关端点
-    this.app.post('/api/manual-review', this.riskController.submitManualReview);
-    this.app.get('/api/pending-reviews', this.riskController.getPendingReviews);
-    this.app.get('/api/review-history/:operation_id', this.riskController.getReviewHistory);
+    this.app.post('/api/manual-review', requireRiskAdmin, this.riskController.submitManualReview);
+    this.app.get('/api/pending-reviews', requireRiskAdmin, this.riskController.getPendingReviews);
+    this.app.get('/api/review-history/:operation_id', requireRiskAdmin, this.riskController.getReviewHistory);
+
+    // 后台风控管理端点
+    this.app.get('/api/admin/withdraw-risk-rules', requireRiskAdmin, this.riskController.getWithdrawRiskRules);
+    this.app.patch('/api/admin/withdraw-risk-rules/:id', requireRiskAdmin, this.riskController.updateWithdrawRiskRule);
+    this.app.get('/api/admin/address-risks', requireRiskAdmin, this.riskController.getAddressRisks);
+    this.app.post('/api/admin/address-risks', requireRiskAdmin, this.riskController.createAddressRisk);
+    this.app.patch('/api/admin/address-risks/:id/enabled', requireRiskAdmin, this.riskController.updateAddressRiskEnabled);
 
     // 查询风控评估结果
     this.app.get('/api/assessment/:operation_id', this.riskController.getAssessmentByOperationId);

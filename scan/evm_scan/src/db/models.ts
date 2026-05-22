@@ -136,14 +136,17 @@ export class TransactionDAO {
  */
 export class WalletDAO {
   /**
-   * 获取所有用户钱包地址
+   * 获取所有活跃 EVM 用户钱包地址
    */
   async getAllWalletAddresses(): Promise<string[]> {
     try {
-      const rows = await database.all('SELECT DISTINCT address FROM wallets WHERE chain_type = ?', ['evm']);
+      const rows = await database.all(
+        'SELECT DISTINCT address FROM wallets WHERE chain_type = ? AND wallet_type = ? AND is_active = ?',
+        ['evm', 'user', 1]
+      );
       return rows.map(row => row.address.toLowerCase());
     } catch (error) {
-      logger.error('获取所有钱包地址失败', { error });
+      logger.error('获取活跃 EVM 用户钱包地址失败', { error });
       throw error;
     }
   }
@@ -249,12 +252,39 @@ export class TokenDAO {
   }
 }
 
+export class FundTaskDAO {
+  /**
+   * 归集服务给 ERC20 用户地址补 ETH gas 时，链上表现是“热钱包 -> 用户地址”的原生币转账。
+   * 这不是用户充值，扫描器需要按 fund_tasks.metadata 里的 gasFundingTxHash 跳过入账。
+   */
+  async getGasFundingTaskByTxHash(txHash: string): Promise<{ id: number; status: string; metadata?: string } | null> {
+    try {
+      const rows = await database.all(
+        'SELECT id, status, metadata FROM fund_tasks WHERE metadata IS NOT NULL'
+      );
+      const normalized = txHash.toLowerCase();
+      return rows.find(row => {
+        try {
+          const metadata = JSON.parse(row.metadata || '{}');
+          return String(metadata.gasFundingTxHash || '').toLowerCase() === normalized;
+        } catch {
+          return false;
+        }
+      }) || null;
+    } catch (error) {
+      logger.error('查询归集 gas 补给任务失败', { txHash, error });
+      throw error;
+    }
+  }
+}
+
 
 // 导出DAO实例
 export const blockDAO = new BlockDAO();
 export const transactionDAO = new TransactionDAO();
 export const walletDAO = new WalletDAO();
 export const tokenDAO = new TokenDAO();
+export const fundTaskDAO = new FundTaskDAO();
 
 // 导出数据库实例
 export { database } from './connection';

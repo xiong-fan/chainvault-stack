@@ -1,6 +1,105 @@
-.claude
-.claude/settings.local.json
-test-ledger/
-articles/
+# Dependencies
+node_modules/
+**/node_modules/
+jspm_packages/
 
+# Package manager noise
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.yarn-integrity
+
+# Environment and local secrets
+.env
+.env.*
+**/.env
+**/.env.*
+keys.env
+*.pem
+*.key
+*.secret
+*keypair*.json
+solana-payer-keypair*.json
+!*.env.example
+!**/*.env.example
+
+# Databases and local persistence
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+wallet.db
+wallet.db-shm
+wallet.db-wal
+*.backup-*
+
+# Solana / local chain runtime data
+test-ledger/
+ledger/
+.ledger/
+validator-ledger/
+cache/
+*.so
+
+# Build outputs
+dist/
+**/dist/
+build/
+**/build/
+out/
+**/out/
+.next/
+**/.next/
+.turbo/
+**/.turbo/
+
+# TypeScript / framework caches
+*.tsbuildinfo
+.eslintcache
+.cache/
+**/.cache/
+.parcel-cache/
+**/.parcel-cache/
+.nuxt/
+.vuepress/dist/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
+
+# Logs and runtime files
+logs/
+**/logs/
+*.log
+pids/
+**/pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage and test output
+coverage/
+**/coverage/
+.nyc_output/
+**/.nyc_output/
+
+# IDE / editor local state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local assistant / note scratch data
+.claude/
+.claude/settings.local.json
 .unotes/
+articles/

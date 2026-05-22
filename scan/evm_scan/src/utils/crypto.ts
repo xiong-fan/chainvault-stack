@@ -21,9 +21,9 @@ export class Ed25519Signer {
       this.publicKey = this.privateKey.slice(32, 64);
     } else {
       // 从环境变量加载
-      const privateKeyFromEnv = process.env.SCAN_PRIVATE_KEY;
+      const privateKeyFromEnv = process.env.SCAN_EVM_PRIVATE_KEY;
       if (!privateKeyFromEnv) {
-        throw new Error('SCAN_PRIVATE_KEY not found in environment variables');
+        throw new Error('SCAN_EVM_PRIVATE_KEY not found in environment variables');
       }
       this.privateKey = this.hexToUint8Array(privateKeyFromEnv);
       this.publicKey = this.privateKey.slice(32, 64);

@@ -1,3 +1,9 @@
+---
+title: API_USAGE
+type: note
+permalink: cex-wallet/api-usage
+---
+
 # 钱包系统 API 使用说明
 
 各服务默认端口：
@@ -444,4 +450,3 @@ curl -X PUT "http://localhost:3000/api/withdraws/1/status" \
 11. **提现状态**：`user_withdraw_request` → `signing` → `pending` → `processing` → `confirmed`/`failed`
 12. **Gas 费用估算**：系统自动估算 Gas 费用，支持 EIP-1559 交易类型
 13. **地址验证**：提现目标地址必须符合以太坊地址格式（0x开头，40位十六进制）
-

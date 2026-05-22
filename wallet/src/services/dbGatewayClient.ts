@@ -200,6 +200,48 @@ export class DbGatewayClient {
     }
   }
 
+  async deleteUser(userId: number): Promise<void> {
+    try {
+      await this.executeOperation('users', 'delete', 'write', undefined, { id: userId });
+    } catch (error) {
+      throw new Error(`删除用户失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  async updateUserLastLogin(userId: number): Promise<void> {
+    try {
+      await this.executeOperation(
+        'users',
+        'update',
+        'write',
+        {
+          last_login_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        },
+        { id: userId }
+      );
+    } catch (error) {
+      throw new Error(`更新用户登录时间失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  async updateUserType(userId: number, userType: string): Promise<void> {
+    try {
+      await this.executeOperation(
+        'users',
+        'update',
+        'write',
+        {
+          user_type: userType,
+          updated_at: new Date().toISOString()
+        },
+        { id: userId }
+      );
+    } catch (error) {
+      throw new Error(`更新用户类型失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
   /**
    * 查询用户
    */
@@ -214,6 +256,57 @@ export class DbGatewayClient {
       return result || [];
     } catch (error) {
       throw new Error(`查询用户失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  async createAuthSession(params: {
+    user_id: number;
+    token_hash: string;
+    expires_at: string;
+  }): Promise<number> {
+    try {
+      const now = new Date().toISOString();
+      const result = await this.executeOperation('auth_sessions', 'insert', 'sensitive', {
+        user_id: params.user_id,
+        token_hash: params.token_hash,
+        expires_at: params.expires_at,
+        revoked_at: null,
+        created_at: now,
+        updated_at: now
+      });
+      return result.lastID;
+    } catch (error) {
+      throw new Error(`创建认证会话失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  async getAuthSessions(conditions: {
+    id?: number;
+    user_id?: number;
+    token_hash?: string;
+  }): Promise<any[]> {
+    try {
+      const result = await this.executeOperation('auth_sessions', 'select', 'sensitive', undefined, conditions);
+      return result || [];
+    } catch (error) {
+      throw new Error(`查询认证会话失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  async revokeAuthSession(tokenHash: string): Promise<void> {
+    try {
+      await this.executeOperation(
+        'auth_sessions',
+        'update',
+        'sensitive',
+        {
+          revoked_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        },
+        { token_hash: tokenHash }
+      );
+    } catch (error) {
+      throw new Error(`注销认证会话失败: ${error instanceof Error ? error.message : '未知错误'}`);
     }
   }
 
@@ -263,9 +356,11 @@ export class DbGatewayClient {
    * 查询代币配置
    */
   async getTokens(conditions: {
+    chain_type?: string;
     chain_id?: number;
     token_symbol?: string;
     token_address?: string;
+    status?: number;
   }): Promise<any[]> {
     try {
       const result = await this.executeOperation('tokens', 'select', 'read', undefined, conditions);
@@ -361,6 +456,7 @@ export class DbGatewayClient {
     user_id: number;
     to_address: string;
     token_id: number;
+    token_symbol?: string;
     amount: string;
     fee: string;
     chain_id: number;
@@ -398,7 +494,16 @@ export class DbGatewayClient {
         table: 'withdraws',
         action: 'insert',
         data: requestData,
-        timestamp
+        timestamp,
+        context: {
+          user_id: params.user_id,
+          amount: params.amount,
+          to_address: params.to_address,
+          token_id: params.token_id,
+          ...(params.token_symbol ? { token_symbol: params.token_symbol } : {}),
+          chain_id: params.chain_id,
+          chain_type: params.chain_type
+        }
       });
 
       // 风控可能通过 prepareDbOperation 修改数据（例如：reject 时修改 status 为 rejected）
@@ -514,16 +619,11 @@ export class DbGatewayClient {
   }
 
   /**
-   * 原子性递增 nonce
-   * 注意：这个操作比较特殊，需要先查询再条件更新
+   * 查询热钱包本地 nonce。
    */
-  async atomicIncrementNonce(address: string, chainId: number, expectedNonce: number): Promise<{
-    success: boolean;
-    newNonce: number;
-  }> {
+  async getWalletNonce(address: string, chainId: number): Promise<number> {
     try {
-      // 查询当前nonce
-      const currentRecords = await this.executeOperation(
+      const records = await this.executeOperation(
         'wallet_nonces',
         'select',
         'read',
@@ -531,9 +631,59 @@ export class DbGatewayClient {
         { address, chain_id: chainId }
       );
 
-      const currentNonce = currentRecords && currentRecords.length > 0 ? currentRecords[0].nonce : 0;
+      return records && records.length > 0 ? records[0].nonce : -1;
+    } catch (error) {
+      throw new Error(`查询wallet nonce失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
 
-      // 检查期望的nonce是否匹配
+  /**
+   * 条件式占用 nonce：只有 DB 当前 nonce 等于 expectedNonce 时才推进到 expectedNonce + 1。
+   * 业务含义是“签名前先占坑”，避免同一热钱包并发提现拿到相同 nonce。
+   */
+  async reserveNonce(address: string, chainId: number, expectedNonce: number): Promise<{
+    success: boolean;
+    newNonce: number;
+  }> {
+    try {
+      const currentNonce = await this.getWalletNonce(address, chainId);
+
+      if (currentNonce === -1) {
+        if (expectedNonce !== 0) {
+          return {
+            success: false,
+            newNonce: currentNonce
+          };
+        }
+
+        try {
+          await this.executeOperation(
+            'wallet_nonces',
+            'insert',
+            'write',
+            {
+              address,
+              chain_id: chainId,
+              nonce: expectedNonce + 1,
+              last_used_at: new Date().toISOString(),
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }
+          );
+        } catch {
+          // 并发首次占用时，另一笔提现可能已经插入记录；返回当前值让上层重试选择。
+          return {
+            success: false,
+            newNonce: await this.getWalletNonce(address, chainId)
+          };
+        }
+
+        return {
+          success: true,
+          newNonce: expectedNonce + 1
+        };
+      }
+
       if (currentNonce !== expectedNonce) {
         return {
           success: false,
@@ -544,6 +694,7 @@ export class DbGatewayClient {
       // 执行更新（带条件检查）
       const updateData = {
         nonce: expectedNonce + 1,
+        last_used_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       };
 
@@ -562,22 +713,147 @@ export class DbGatewayClient {
           newNonce: expectedNonce + 1
         };
       } else {
-        // 更新失败，重新查询当前nonce
-        const retryRecords = await this.executeOperation(
-          'wallet_nonces',
-          'select',
-          'read',
-          undefined,
-          { address, chain_id: chainId }
-        );
-        const retryNonce = retryRecords && retryRecords.length > 0 ? retryRecords[0].nonce : expectedNonce;
+        const retryNonce = await this.getWalletNonce(address, chainId);
         return {
           success: false,
           newNonce: retryNonce
         };
       }
     } catch (error) {
-      throw new Error(`原子性递增nonce失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      throw new Error(`占用nonce失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  /**
+   * 兼容旧调用：交易已发出后确保 DB nonce 至少推进到 usedNonce + 1。
+   */
+  async atomicIncrementNonce(address: string, chainId: number, expectedNonce: number): Promise<{
+    success: boolean;
+    newNonce: number;
+  }> {
+    return this.ensureNonceAtLeast(address, chainId, expectedNonce + 1);
+  }
+
+  /**
+   * 条件式回退 nonce：只有当前值仍是 reservedNonce + 1 时才允许回退。
+   * 如果期间已有其他提现继续占用 nonce，这里不会误伤后续提现。
+   */
+  async releaseReservedNonce(address: string, chainId: number, reservedNonce: number): Promise<boolean> {
+    try {
+      const result = await this.executeOperation(
+        'wallet_nonces',
+        'update',
+        'write',
+        {
+          nonce: reservedNonce,
+          updated_at: new Date().toISOString()
+        },
+        { address, chain_id: chainId, nonce: reservedNonce + 1 }
+      );
+
+      return result.changes > 0;
+    } catch (error) {
+      console.error('回退预占nonce失败:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 广播前安全同步本地 nonce，可前进也可回落。
+   * 调用方必须先确认没有同热钱包未完成提现需要保护，避免把已占用 nonce 覆盖掉。
+   */
+  async setWalletNonceForBroadcast(address: string, chainId: number, nonce: number): Promise<boolean> {
+    try {
+      const currentNonce = await this.getWalletNonce(address, chainId);
+      const now = new Date().toISOString();
+
+      if (currentNonce === -1) {
+        await this.executeOperation(
+          'wallet_nonces',
+          'insert',
+          'write',
+          {
+            address,
+            chain_id: chainId,
+            nonce,
+            created_at: now,
+            updated_at: now
+          }
+        );
+        return true;
+      }
+
+      const result = await this.executeOperation(
+        'wallet_nonces',
+        'update',
+        'write',
+        { nonce, updated_at: now },
+        { address, chain_id: chainId }
+      );
+
+      return result.changes > 0;
+    } catch (error) {
+      console.error('广播前同步wallet nonce失败:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 确保本地 nonce 不小于指定值；不会把更大的本地 nonce 降低。
+   */
+  async ensureNonceAtLeast(address: string, chainId: number, minimumNonce: number): Promise<{
+    success: boolean;
+    newNonce: number;
+  }> {
+    try {
+      const currentNonce = await this.getWalletNonce(address, chainId);
+
+      if (currentNonce >= minimumNonce) {
+        return {
+          success: true,
+          newNonce: currentNonce
+        };
+      }
+
+      if (currentNonce === -1) {
+        try {
+          await this.executeOperation(
+            'wallet_nonces',
+            'insert',
+            'write',
+            {
+              address,
+              chain_id: chainId,
+              nonce: minimumNonce,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            }
+          );
+        } catch {
+          await this.executeOperation(
+            'wallet_nonces',
+            'update',
+            'write',
+            { nonce: minimumNonce, updated_at: new Date().toISOString() },
+            { address, chain_id: chainId, nonce: { '<': minimumNonce } }
+          );
+        }
+      } else {
+        await this.executeOperation(
+          'wallet_nonces',
+          'update',
+          'write',
+          { nonce: minimumNonce, updated_at: new Date().toISOString() },
+          { address, chain_id: chainId, nonce: { '<': minimumNonce } }
+        );
+      }
+
+      return {
+        success: true,
+        newNonce: minimumNonce
+      };
+    } catch (error) {
+      throw new Error(`同步nonce失败: ${error instanceof Error ? error.message : '未知错误'}`);
     }
   }
 
@@ -586,40 +862,7 @@ export class DbGatewayClient {
    */
   async syncNonceFromChain(address: string, chainId: number, chainNonce: number): Promise<boolean> {
     try {
-      // 查询 nonce 记录是否存在
-      const existingRecords = await this.executeOperation(
-        'wallet_nonces',
-        'select',
-        'read',
-        undefined,
-        { address, chain_id: chainId }
-      );
-
-      if (existingRecords && existingRecords.length > 0) {
-        // 记录存在，执行更新
-        await this.executeOperation(
-          'wallet_nonces',
-          'update',
-          'write',
-          { nonce: chainNonce, updated_at: new Date().toISOString() },
-          { address, chain_id: chainId }
-        );
-      } else {
-        // 记录不存在，执行插入
-        await this.executeOperation(
-          'wallet_nonces',
-          'insert',
-          'write',
-          {
-            address,
-            chain_id: chainId,
-            nonce: chainNonce,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          }
-        );
-      }
-
+      await this.ensureNonceAtLeast(address, chainId, chainNonce);
       return true;
     } catch (error) {
       console.error('同步链上nonce失败:', error);
@@ -664,7 +907,7 @@ export class DbGatewayClient {
         status: params.status || 'pending',
         block_number: params.block_number || null,
         tx_hash: params.tx_hash || null,
-        event_index: params.event_index || null,
+        event_index: params.event_index ?? null,
         metadata: params.metadata ? JSON.stringify(params.metadata) : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()

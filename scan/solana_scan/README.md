@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/scan/solana-scan/readme
+---
+
 # Solana Scan Module
 
 Solana区块链扫描器 - CEX钱包系统
@@ -44,7 +50,7 @@ Solana区块链扫描器 - CEX钱包系统
 ### 1. 安装依赖
 
 ```bash
-cd /Users/emmett/openspace_code/cex-wallet/scan/solana_scan
+cd /Users/tangao/github_program/cex-wallet/scan/solana_scan
 npm install
 ```
 
@@ -74,7 +80,11 @@ SCAN_INTERVAL=2
 
 # DB Gateway Configuration
 DB_GATEWAY_URL=http://localhost:3003
-DB_GATEWAY_SECRET=your-secret-key-here
+SCAN_PUBLIC_KEY=your-32-byte-public-key-hex
+SCAN_SOLANA_PRIVATE_KEY=your-64-byte-secret-key-hex
+
+# Legacy compatibility only. Prefer SCAN_SOLANA_PRIVATE_KEY for new deployments.
+DB_GATEWAY_SECRET=
 
 # Log Level
 LOG_LEVEL=info
@@ -119,6 +129,14 @@ npm start
   2. 从缓存的 `ataToMintMap` 获取（性能最优）
   3. 从 `postTokenBalances` / `preTokenBalances` 提取（备用方案，适用于新创建的 ATA）
 - 只保留钱包地址在监控列表中的转账
+- 如果 ATA 映射缺失，会从 `postTokenBalances` / `preTokenBalances` 提取 `owner` 和 `mint`；只有 owner 是监控钱包且 mint 可确认时才入账，否则记录结构化 warning 供补偿排查。
+
+### 签名密钥
+
+- `SCAN_SOLANA_PRIVATE_KEY` 是 scan 模块调用 `db_gateway` 的 Ed25519 私钥，必须是 64 bytes hex。
+- `SCAN_PUBLIC_KEY` 必须配置在共享环境中供 `db_gateway` 验签，必须是 32 bytes hex。
+- `DB_GATEWAY_SECRET` 仅作为旧配置兼容 fallback，新部署不要继续使用。
+- 模块启动时会先校验密钥长度，再执行 Solana RPC、`db_gateway`、`risk_control`、sqlite 只读连接健康检查。
 
 
 ### 回滚处理
@@ -168,5 +186,3 @@ npm run build
 # 清理
 npm run clean
 ```
-
-

@@ -1,4 +1,4 @@
-import { walletDAO, tokenDAO, solanaTokenAccountDAO } from '../db/models';
+import { fundTaskDAO, walletDAO, tokenDAO, solanaTokenAccountDAO } from '../db/models';
 import { getDbGatewayClient } from './dbGatewayClient';
 import logger from '../utils/logger';
 
@@ -10,6 +10,7 @@ const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 export interface ParsedDeposit {
   txHash: string;
   slot: number;
+  eventIndex: number;
   fromAddr?: string;
   toAddr: string;
   tokenMint?: string;
@@ -24,7 +25,9 @@ export interface ParsedDeposit {
 export class TransactionParser {
   private dbGatewayClient = getDbGatewayClient();
   private monitoredAddresses: Set<string> = new Set();
+  private walletByAddress: Map<string, any> = new Map();
   private tokenMintMap: Map<string, any> = new Map();
+  private nativeSolToken: any | null = null;
   private ataToWalletMap: Map<string, string> = new Map(); // ATA地址 -> 钱包地址映射
   private ataToMintMap: Map<string, string> = new Map(); // ATA地址 -> Mint地址映射
   private lastAddressUpdate: number = 0;
@@ -43,8 +46,12 @@ export class TransactionParser {
       logger.info('刷新监控地址和代币缓存...');
 
       // 获取所有Solana钱包地址
-      const addresses = await walletDAO.getAllSolanaWalletAddresses();
-      this.monitoredAddresses = new Set(addresses.map(addr => addr.toLowerCase()));
+      const wallets = await walletDAO.getAllSolanaWallets();
+      this.monitoredAddresses = new Set(wallets.map(wallet => wallet.address.toLowerCase()));
+      this.walletByAddress.clear();
+      for (const wallet of wallets) {
+        this.walletByAddress.set(wallet.address.toLowerCase(), wallet);
+      }
 
       // 获取所有Solana代币
       const tokens = await tokenDAO.getAllSolanaTokens();
@@ -54,6 +61,7 @@ export class TransactionParser {
           this.tokenMintMap.set(token.token_address.toLowerCase(), token);
         }
       }
+      this.nativeSolToken = tokens.find(token => token.is_native) || null;
 
       // 获取ATA到钱包地址的映射
       this.ataToWalletMap = await solanaTokenAccountDAO.getATAToWalletMap();
@@ -65,16 +73,11 @@ export class TransactionParser {
       this.lastTokenUpdate = Date.now();
       this.lastATAUpdate = Date.now();
 
-      // 打印前3条ATA映射用于调试
-      const ataEntries = Array.from(this.ataToWalletMap.entries()).slice(0, 3);
-
       logger.info('缓存刷新完成', {
         addressCount: this.monitoredAddresses.size,
         tokenCount: this.tokenMintMap.size,
         ataCount: this.ataToWalletMap.size,
-        ataMintCount: this.ataToMintMap.size,
-        sampleATAMappings: ataEntries.map(([ata, wallet]) => ({ ata, wallet })),
-        sampleAddresses: Array.from(this.monitoredAddresses).slice(0, 3)
+        ataMintCount: this.ataToMintMap.size
       });
     } catch (error) {
       logger.error('刷新缓存失败', { error });
@@ -142,6 +145,16 @@ export class TransactionParser {
 
     // 处理每个签名（虽然通常第一个是主签名，但我们记录所有签名）
     for (const txHash of signatures) {
+      const internalFundTask = await fundTaskDAO.getInternalTransferTaskByTxHash(txHash);
+      if (internalFundTask) {
+        logger.info('跳过 Solana 归集内部交易，不作为用户充值入账', {
+          txHash,
+          fundTaskId: internalFundTask.id,
+          status: internalFundTask.status
+        });
+        continue;
+      }
+
       // 解析 instructions 中的转账（包括 SOL 和 SPL Token）
       const transferDeposits = await this.parseInstructionTransfers(tx, slot, txHash, blockTime, status);
       deposits.push(...transferDeposits);
@@ -161,6 +174,7 @@ export class TransactionParser {
     status: 'confirmed' | 'finalized' = 'confirmed'
   ): Promise<ParsedDeposit[]> {
     const deposits: ParsedDeposit[] = [];
+    let nextEventIndex = 0;
 
     try {
       // compiledInstructions
@@ -169,15 +183,21 @@ export class TransactionParser {
 
       // 解析主指令
       for (const ix of instructions) {
-        const deposit = await this.parseInstruction(ix, tx, slot, txHash, blockTime, status);
-        if (deposit) deposits.push(deposit);
+        const deposit = await this.parseInstruction(ix, tx, slot, txHash, nextEventIndex, blockTime, status);
+        if (deposit) {
+          deposits.push(deposit);
+          nextEventIndex++;
+        }
       }
 
       // 解析内部指令
       for (const innerIx of innerInstructions) {
         for (const ix of innerIx.instructions || []) {
-          const deposit = await this.parseInstruction(ix, tx, slot, txHash, blockTime, status);
-          if (deposit) deposits.push(deposit);
+          const deposit = await this.parseInstruction(ix, tx, slot, txHash, nextEventIndex, blockTime, status);
+          if (deposit) {
+            deposits.push(deposit);
+            nextEventIndex++;
+          }
         }
       }
 
@@ -208,10 +228,31 @@ export class TransactionParser {
               });
             }
           } else {
-            logger.debug('Token转账ATA未映射', {
-              ataAddress,
-              ataMapSize: this.ataToWalletMap.size
-            });
+            const balanceInfo = this.extractTokenBalanceInfo(tx, deposit.toAddr);
+            if (balanceInfo.owner && balanceInfo.mint && this.monitoredAddresses.has(balanceInfo.owner.toLowerCase())) {
+              deposit.toAddr = balanceInfo.owner;
+              deposit.tokenMint = deposit.tokenMint || balanceInfo.mint;
+              filteredDeposits.push(deposit);
+              logger.debug('Token转账通过Token Balances owner匹配成功', {
+                slot,
+                txHash,
+                ataAddress,
+                walletAddress: balanceInfo.owner,
+                tokenMint: deposit.tokenMint,
+                amount: deposit.amount
+              });
+            } else {
+              logger.debug('Token转账ATA未映射且无法确认监控owner，跳过入账', {
+                slot,
+                txHash,
+                destinationAta: ataAddress,
+                mint: deposit.tokenMint || balanceInfo.mint || 'unknown',
+                owner: balanceInfo.owner || 'unknown',
+                hasMint: Boolean(deposit.tokenMint || balanceInfo.mint),
+                hasOwner: Boolean(balanceInfo.owner),
+                ataMapSize: this.ataToWalletMap.size
+              });
+            }
           }
         } else {
           // SOL 转账：直接添加（已在 parseSystemProgramInstruction 中过滤）
@@ -234,6 +275,7 @@ export class TransactionParser {
     tx: any,
     slot: number,
     txHash: string,
+    eventIndex: number,
     blockTime?: number | null,
     status: 'confirmed' | 'finalized' = 'confirmed'
   ): Promise<ParsedDeposit | null> {
@@ -242,14 +284,14 @@ export class TransactionParser {
 
       // 检查是否是 System Program (SOL 转账)
       if (programId === SYSTEM_PROGRAM_ID) {
-        return this.parseSystemProgramInstruction(ix, slot, txHash, blockTime, status);
+        return this.parseSystemProgramInstruction(ix, slot, txHash, eventIndex, blockTime, status);
       }
 
       // 检查是否是 Token 程序 (SPL Token 转账)
       if (programId === TOKEN_PROGRAM_ID || programId === TOKEN_2022_PROGRAM_ID) {
         // 解析 parsed 指令
         if (ix.parsed) {
-          return this.parseParsedTokenInstruction(ix, programId, tx, slot, txHash, blockTime, status);
+          return this.parseParsedTokenInstruction(ix, programId, tx, slot, txHash, eventIndex, blockTime, status);
         }
       }
 
@@ -269,6 +311,7 @@ export class TransactionParser {
     ix: any,
     slot: number,
     txHash: string,
+    eventIndex: number,
     blockTime?: number | null,
     status: 'confirmed' | 'finalized' = 'confirmed'
   ): ParsedDeposit | null {
@@ -301,6 +344,7 @@ export class TransactionParser {
       return {
         txHash,
         slot,
+        eventIndex,
         fromAddr: info.source || undefined,
         toAddr: destination,
         amount: lamports.toString(),
@@ -326,7 +370,7 @@ export class TransactionParser {
    * 解决方案：从交易的 postTokenBalances/preTokenBalances 中提取
    * 这些字段包含了交易中所有 Token Account 的状态，包括 mint 地址
    */
-  private extractMintFromTokenBalances(tx: any, accountAddress: string): string | undefined {
+  private extractTokenBalanceInfo(tx: any, accountAddress: string): { mint?: string; owner?: string } {
     try {
       // 获取交易中所有涉及的账户地址
       const accountKeys = tx.transaction?.message?.accountKeys || [];
@@ -344,42 +388,48 @@ export class TransactionParser {
 
       if (accountIndex === -1) {
         logger.debug('在交易账户列表中未找到目标地址', { accountAddress });
-        return undefined;
+        return {};
       }
 
-      // 从 postTokenBalances 中查找该账户的 mint
+      // 从 postTokenBalances 中查找该账户的 mint 和 owner
       const postBalances = tx.meta?.postTokenBalances || [];
       for (const balance of postBalances) {
-        if (balance.accountIndex === accountIndex && balance.mint) {
+        if (balance.accountIndex === accountIndex && (balance.mint || balance.owner)) {
           logger.debug('从 postTokenBalances 提取到 mint', {
             accountAddress,
-            mint: balance.mint
+            mint: balance.mint,
+            owner: balance.owner
           });
-          return balance.mint;
+          return { mint: balance.mint, owner: balance.owner };
         }
       }
 
       // 如果 postTokenBalances 中没有，尝试 preTokenBalances
       const preBalances = tx.meta?.preTokenBalances || [];
       for (const balance of preBalances) {
-        if (balance.accountIndex === accountIndex && balance.mint) {
+        if (balance.accountIndex === accountIndex && (balance.mint || balance.owner)) {
           logger.debug('从 preTokenBalances 提取到 mint', {
             accountAddress,
-            mint: balance.mint
+            mint: balance.mint,
+            owner: balance.owner
           });
-          return balance.mint;
+          return { mint: balance.mint, owner: balance.owner };
         }
       }
 
       logger.debug('在 Token Balances 中未找到 mint', { accountAddress });
-      return undefined;
+      return {};
     } catch (error) {
-      logger.error('从 Token Balances 提取 mint 失败', {
+      logger.error('从 Token Balances 提取信息失败', {
         accountAddress,
         error: error instanceof Error ? error.message : String(error)
       });
-      return undefined;
+      return {};
     }
+  }
+
+  private extractMintFromTokenBalances(tx: any, accountAddress: string): string | undefined {
+    return this.extractTokenBalanceInfo(tx, accountAddress).mint;
   }
 
   /**
@@ -396,6 +446,7 @@ export class TransactionParser {
     tx: any,
     slot: number,
     txHash: string,
+    eventIndex: number,
     blockTime?: number | null,
     status: 'confirmed' | 'finalized' = 'confirmed'
   ): ParsedDeposit | null {
@@ -449,6 +500,7 @@ export class TransactionParser {
       return {
         txHash,
         slot,
+        eventIndex,
         fromAddr: info.source || undefined,
         toAddr: destination, // 这是 Token Account 地址，稍后需要匹配钱包地址
         tokenMint: mint,
@@ -468,84 +520,24 @@ export class TransactionParser {
    */
   async processDeposit(deposit: ParsedDeposit): Promise<boolean> {
     try {
-      // 获取钱包信息
-      const wallet = await walletDAO.getWalletByAddress(deposit.toAddr);
-      if (!wallet) {
-        logger.error('未找到钱包信息', {
-          address: deposit.toAddr,
-          txHash: deposit.txHash
-        });
-        return false;
-      }
+      await this.recordDepositTransaction(deposit);
+      await this.createDepositCredit(deposit);
 
-      // 获取代币信息
-      let token;
-      if (deposit.type === 'sol') {
-        token = await tokenDAO.getSolNativeToken();
-      } else if (deposit.tokenMint) {
-        token = await tokenDAO.getTokenByMintAddress(deposit.tokenMint);
-      }
-
-      if (!token) {
-        logger.error('未找到代币信息', {
-          type: deposit.type,
-          mint: deposit.tokenMint,
-          txHash: deposit.txHash
-        });
-        return false;
-      }
-
-      // 插入Solana交易记录
-      await this.dbGatewayClient.insertSolanaTransaction({
-        slot: deposit.slot,
-        tx_hash: deposit.txHash,
-        from_addr: deposit.fromAddr,
-        to_addr: deposit.toAddr,
-        token_mint: deposit.tokenMint || undefined,
-        amount: deposit.amount,
-        type: 'deposit',
-        status: deposit.status,
-        block_time: deposit.blockTime
-      });
-
-      // 创建 credit 记录
-      await this.dbGatewayClient.createCredit({
-        user_id: wallet.user_id,
-        address: deposit.toAddr,
-        token_id: token.id,
-        token_symbol: token.token_symbol,
-        amount: deposit.amount,
-        credit_type: 'deposit',
-        business_type: 'blockchain',
-        reference_type: 'blockchain_tx',
-        chain_type: 'solana',
-        status: deposit.status,
-        block_number: deposit.slot,
-        tx_hash: deposit.txHash,
-        event_index: 0,
-        metadata: {
-          token_type: deposit.type,
-          block_time: deposit.blockTime
-        }
-      });
-
-      logger.info('存款处理完成', {
+      logger.debug('存款处理完成', {
         txHash: deposit.txHash,
+        eventIndex: deposit.eventIndex,
         slot: deposit.slot,
         address: deposit.toAddr,
         amount: deposit.amount,
         type: deposit.type,
-        tokenSymbol: token.token_symbol
+        tokenMint: deposit.tokenMint
       });
 
       return true;
     } catch (error: any) {
-      if (error?.message?.includes('UNIQUE')) {
-        logger.debug('存款记录已存在', { txHash: deposit.txHash });
-        return true;
-      }
       logger.error('处理存款失败', {
         txHash: deposit.txHash,
+        eventIndex: deposit.eventIndex,
         toAddr: deposit.toAddr,
         type: deposit.type,
         tokenMint: deposit.tokenMint,
@@ -553,6 +545,78 @@ export class TransactionParser {
       });
       return false;
     }
+  }
+
+  buildTransactionRecord(deposit: ParsedDeposit) {
+    return {
+      slot: deposit.slot,
+      tx_hash: deposit.txHash,
+      from_addr: deposit.fromAddr,
+      to_addr: deposit.toAddr,
+      token_mint: deposit.tokenMint || undefined,
+      amount: deposit.amount,
+      type: 'deposit',
+      status: deposit.status,
+      block_time: deposit.blockTime
+    };
+  }
+
+  async recordDepositTransaction(deposit: ParsedDeposit): Promise<boolean> {
+    await this.dbGatewayClient.insertSolanaTransaction({
+      ...this.buildTransactionRecord(deposit),
+      allowExisting: true
+    });
+    return true;
+  }
+
+  async createDepositCredit(deposit: ParsedDeposit): Promise<boolean> {
+    const wallet = this.walletByAddress.get(deposit.toAddr.toLowerCase());
+    if (!wallet) {
+      logger.error('未找到钱包信息', {
+        address: deposit.toAddr,
+        txHash: deposit.txHash
+      });
+      return false;
+    }
+
+    let token;
+    if (deposit.type === 'sol') {
+      token = this.nativeSolToken;
+    } else if (deposit.tokenMint) {
+      token = this.tokenMintMap.get(deposit.tokenMint.toLowerCase());
+    }
+
+    if (!token) {
+      logger.error('未找到代币信息', {
+        type: deposit.type,
+        mint: deposit.tokenMint,
+        txHash: deposit.txHash
+      });
+      return false;
+    }
+
+    await this.dbGatewayClient.createCredit({
+      user_id: wallet.user_id,
+      address: deposit.toAddr,
+      token_id: token.id,
+      token_symbol: token.token_symbol,
+      amount: deposit.amount,
+      credit_type: 'deposit',
+      business_type: 'blockchain',
+      reference_type: 'blockchain_tx',
+      chain_id: token.chain_id,
+      chain_type: 'solana',
+      status: deposit.status,
+      block_number: deposit.slot,
+      tx_hash: deposit.txHash,
+      event_index: deposit.eventIndex,
+      metadata: {
+        token_type: deposit.type,
+        block_time: deposit.blockTime
+      }
+    });
+
+    return true;
   }
 
   /**

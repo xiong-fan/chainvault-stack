@@ -24,6 +24,16 @@ export const SENSITIVE_TABLES: SensitiveTableConfig[] = [
     actions: ['insert', 'update'],
     reason: 'Withdraw operations require risk control'
   },
+  {
+    table: 'fund_tasks',
+    actions: ['insert', 'update', 'delete'],
+    reason: 'Fund collection tasks move on-chain inventory and require risk control'
+  },
+  {
+    table: 'auth_sessions',
+    actions: ['insert', 'select', 'update', 'delete'],
+    reason: 'Auth sessions contain login token hashes'
+  },
 ];
 
 /**

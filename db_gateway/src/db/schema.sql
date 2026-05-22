@@ -19,6 +19,20 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- ============================================
+-- 1.1 用户认证会话表 (auth_sessions)
+-- ============================================
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  token_hash TEXT UNIQUE NOT NULL,
+  expires_at DATETIME NOT NULL,
+  revoked_at DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- ============================================
 -- 2. 钱包表 (wallets)
 -- ============================================
 CREATE TABLE IF NOT EXISTS wallets (
@@ -219,6 +233,56 @@ CREATE TABLE IF NOT EXISTS withdraws (
 );
 
 -- ============================================
+-- 10. 资金归集任务表 )
+-- ============================================
+CREATE TABLE IF NOT EXISTS fund_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id TEXT UNIQUE NOT NULL,       -- 操作ID（UUID），用于签名、风控和幂等
+  task_type TEXT NOT NULL DEFAULT 'collect',
+  chain_type TEXT NOT NULL,                -- evm/btc/solana，第一版仅 evm
+  chain_id INTEGER NOT NULL,
+  token_id INTEGER NOT NULL,
+  token_symbol TEXT NOT NULL,
+  from_address TEXT NOT NULL,              -- 用户充值地址
+  to_address TEXT NOT NULL,                -- 热钱包地址
+  amount TEXT NOT NULL,                    -- 归集金额（最小单位）
+  fee_amount TEXT NOT NULL DEFAULT '0',    -- 预计或实际手续费（最小单位）
+  tx_hash TEXT,
+  nonce INTEGER,
+  status TEXT NOT NULL DEFAULT 'planned',  -- 状态说明：
+                                           -- planned：已规划归集，尚未开始链上动作。
+                                           -- gas_funding：ERC20 归集前发现用户地址原生币不足，正在准备补 gas。
+                                           -- gas_pending：gas 补给交易已广播，等待链上确认。
+                                           -- gas_funded：gas 补给已确认，等待执行 ERC20 归集。
+                                           -- signing：归集交易已绑定 nonce，正在请求 signer 签名。
+                                           -- pending：归集交易已广播，等待链上确认。
+                                           -- confirmed：归集交易链上成功，正在写入归集流水。
+                                           -- finalized：归集流水已完整落库。
+                                           -- failed：补 gas、签名、广播、链上执行或落账失败。
+                                           -- skipped：因阈值、经济性或配置原因主动跳过，不会自动继续执行。
+  error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  metadata TEXT,                           -- JSON 扩展信息：gas、tokenAddress、receipt 等
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (token_id) REFERENCES tokens(id)
+);
+
+-- ============================================
+-- 10.1 服务游标表
+-- ============================================
+CREATE TABLE IF NOT EXISTS service_cursors (
+  service_name TEXT NOT NULL,                -- 服务名，例如 fund_rebalance
+  cursor_name TEXT NOT NULL,                 -- 游标名，例如 evm_deposit_candidates:11155111
+  cursor_block_no INTEGER NOT NULL DEFAULT 0,-- 已处理到的链上区块高度
+  cursor_row_id INTEGER NOT NULL DEFAULT 0,  -- 同一区块内已处理到的 transactions.id
+  metadata TEXT,                             -- JSON 扩展信息，便于记录上次扫描摘要
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (service_name, cursor_name)
+);
+
+-- ============================================
 -- 索引定义
 -- ============================================
 
@@ -234,6 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_solana_slots_parent ON solana_slots(parent_slot);
 
 -- Transactions 表索引
 CREATE INDEX IF NOT EXISTS idx_transactions_block_hash ON transactions(block_hash);
+CREATE INDEX IF NOT EXISTS idx_transactions_block_id ON transactions(block_no, id);
+CREATE INDEX IF NOT EXISTS idx_transactions_type_status_block ON transactions(type, status, block_no, id);
 CREATE INDEX IF NOT EXISTS idx_transactions_to_addr ON transactions(to_addr);
 CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
 
@@ -249,6 +315,11 @@ CREATE INDEX IF NOT EXISTS idx_solana_token_accounts_wallet ON solana_token_acco
 CREATE INDEX IF NOT EXISTS idx_solana_token_accounts_wallet_token ON solana_token_accounts(wallet_address, token_mint);
 CREATE INDEX IF NOT EXISTS idx_solana_token_accounts_wallet_id ON solana_token_accounts(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_solana_token_accounts_user_id ON solana_token_accounts(user_id);
+
+-- Auth Sessions 表索引
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token_hash ON auth_sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
 
 -- Credits 表索引
 CREATE INDEX IF NOT EXISTS idx_credits_user_token ON credits(user_id, token_id);
@@ -278,6 +349,9 @@ CREATE INDEX IF NOT EXISTS idx_wallet_nonces_address ON wallet_nonces(address);
 CREATE INDEX IF NOT EXISTS idx_wallet_nonces_chain ON wallet_nonces(chain_id);
 CREATE INDEX IF NOT EXISTS idx_wallet_nonces_last_used ON wallet_nonces(last_used_at);
 
+-- Service Cursors 表索引
+CREATE INDEX IF NOT EXISTS idx_service_cursors_name ON service_cursors(service_name, cursor_name);
+
 -- Withdraws 表索引
 CREATE INDEX IF NOT EXISTS idx_withdraws_user_id ON withdraws(user_id);
 CREATE INDEX IF NOT EXISTS idx_withdraws_status ON withdraws(status);
@@ -285,6 +359,18 @@ CREATE INDEX IF NOT EXISTS idx_withdraws_chain ON withdraws(chain_id, chain_type
 CREATE INDEX IF NOT EXISTS idx_withdraws_tx_hash ON withdraws(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_withdraws_created_at ON withdraws(created_at);
 CREATE INDEX IF NOT EXISTS idx_withdraws_operation_id ON withdraws(operation_id);
+
+-- Fund Tasks 表索引
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_status ON fund_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_token ON fund_tasks(token_id);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_chain ON fund_tasks(chain_id, chain_type);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_from_address ON fund_tasks(from_address);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_to_address ON fund_tasks(to_address);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_tx_hash ON fund_tasks(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_fund_tasks_operation_id ON fund_tasks(operation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fund_tasks_open_unique
+  ON fund_tasks(from_address, token_id, chain_id)
+  WHERE status IN ('planned', 'gas_funding', 'gas_pending', 'gas_funded', 'signing', 'pending', 'confirmed');
 
 -- Used Operation IDs 表索引
 CREATE INDEX IF NOT EXISTS idx_operation_ids_id ON used_operation_ids(operation_id);
@@ -294,18 +380,28 @@ CREATE INDEX IF NOT EXISTS idx_operation_ids_expires_at ON used_operation_ids(ex
 -- 视图定义
 -- ============================================
 
+DROP VIEW IF EXISTS v_user_balance_stats;
+DROP VIEW IF EXISTS v_user_token_totals;
+DROP VIEW IF EXISTS v_user_balances;
+
 -- 1. 用户余额实时视图（按地址分组）
 CREATE VIEW IF NOT EXISTS v_user_balances AS
 SELECT
   c.user_id,
-  c.address,
+  c.chain_id,
+  c.chain_type,
+  CASE
+    WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+    ELSE c.address
+  END as address,
   c.token_id,
   c.token_symbol,
   t.decimals,
   SUM(CASE
-    WHEN c.credit_type NOT IN ('freeze') AND (
+    WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL)
     ELSE 0
@@ -318,15 +414,17 @@ SELECT
   SUM(CASE
     WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL)
     ELSE 0
   END) as total_balance,
   PRINTF('%.6f', SUM(CASE
-    WHEN c.credit_type NOT IN ('freeze') AND (
+    WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL)
     ELSE 0
@@ -339,7 +437,8 @@ SELECT
   PRINTF('%.6f', SUM(CASE
     WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL)
     ELSE 0
@@ -347,21 +446,34 @@ SELECT
   MAX(c.updated_at) as last_updated
 FROM credits c
 JOIN tokens t ON c.token_id = t.id
-GROUP BY c.user_id, c.address, c.token_id, c.token_symbol, t.decimals
+GROUP BY
+  c.user_id,
+  c.chain_id,
+  c.chain_type,
+  CASE
+    WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+    ELSE c.address
+  END,
+  c.token_id,
+  c.token_symbol,
+  t.decimals
 HAVING total_balance > 0;
 
 -- 2. 用户代币总余额视图（跨地址聚合，按 token_symbol 合并不同链）
 CREATE VIEW IF NOT EXISTS v_user_token_totals AS
 SELECT
   c.user_id,
+  c.chain_id,
+  c.chain_type,
   c.token_id,
   c.token_symbol,
   MIN(t.decimals) as decimals,
   -- 标准化金额：将所有金额转换到 18 位精度，然后求和
   SUM(CASE
-    WHEN c.credit_type NOT IN ('freeze') AND (
+    WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL) * POWER(10, 18 - t.decimals)
     ELSE 0
@@ -374,16 +486,18 @@ SELECT
   SUM(CASE
     WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL) * POWER(10, 18 - t.decimals)
     ELSE 0
   END) as total_balance,
   -- 格式化金额：从标准化的 18 位精度转换为人类可读格式
   PRINTF('%.6f', SUM(CASE
-    WHEN c.credit_type NOT IN ('freeze') AND (
+    WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL) * POWER(10, 18 - t.decimals)
     ELSE 0
@@ -396,25 +510,30 @@ SELECT
   PRINTF('%.6f', SUM(CASE
     WHEN (
       (c.credit_type = 'deposit' AND c.status = 'finalized') OR
-      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized'))
+      (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+      (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
     )
     THEN CAST(c.amount AS REAL) * POWER(10, 18 - t.decimals)
     ELSE 0
   END) / POWER(10, 18)) as total_balance_formatted,
-  COUNT(DISTINCT c.address) as address_count,
+  COUNT(DISTINCT CASE
+    WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+    ELSE c.address
+  END) as address_count,
   MAX(c.updated_at) as last_updated
 FROM credits c
 JOIN tokens t ON c.token_id = t.id
-GROUP BY c.user_id, c.token_id, c.token_symbol
+GROUP BY c.user_id, c.chain_id, c.chain_type, c.token_id, c.token_symbol
 HAVING total_balance > 0;
 
 -- 3. 用户余额统计视图
 CREATE VIEW IF NOT EXISTS v_user_balance_stats AS
 SELECT
   user_id,
+  COUNT(DISTINCT chain_type || ':' || chain_id) as chain_count,
   COUNT(DISTINCT token_id) as token_count,
-  COUNT(DISTINCT address) as address_count,
+  COUNT(DISTINCT chain_type || ':' || chain_id || ':' || address) as address_count,
   SUM(CASE WHEN total_balance > 0 THEN 1 ELSE 0 END) as positive_balance_count,
   MAX(last_updated) as last_balance_update
-FROM v_user_token_totals
+FROM v_user_balances
 GROUP BY user_id;

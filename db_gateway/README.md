@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/db-gateway/readme
+---
+
 # Database Gateway Service
 
 Database Gateway Service是一个安全的数据库访问网关，使用Ed25519签名验证确保所有数据库操作的安全性.

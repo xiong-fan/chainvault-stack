@@ -1,5 +1,5 @@
 import { viemClient } from '../utils/viemClient';
-import { walletDAO, tokenDAO, database } from '../db/models';
+import { walletDAO, tokenDAO, database, fundTaskDAO } from '../db/models';
 import { getDbGatewayClient } from './dbGatewayClient';
 import logger from '../utils/logger';
 import config from '../config';
@@ -97,7 +97,7 @@ export class TransactionAnalyzer {
         }
       }
 
-      logger.info('优化区块交易分析完成', {
+      logger.debug('优化区块交易分析完成', {
         blockNumber,
         erc20Logs: transferData.erc20Logs.length,
         ethTransactions: transferData.ethTransactions.length,
@@ -118,7 +118,7 @@ export class TransactionAnalyzer {
    */
   async analyzeBatchBlocksForDeposits(fromBlock: number, toBlock: number): Promise<DepositTransaction[]> {
     try {
-      logger.info('开始批量 bloom 过滤器优化分析区块', { fromBlock, toBlock });
+      logger.debug('开始批量 bloom 过滤器优化分析区块', { fromBlock, toBlock });
 
       // 确保地址和代币信息是最新的
       await this.refreshCacheIfNeeded();
@@ -172,7 +172,7 @@ export class TransactionAnalyzer {
         }
       }
 
-      logger.info('批量优化区块分析完成', {
+      logger.debug('批量优化区块分析完成', {
         fromBlock,
         toBlock,
         blockCount: toBlock - fromBlock + 1,
@@ -232,8 +232,8 @@ export class TransactionAnalyzer {
           credit_type: 'deposit',
           business_type: 'blockchain',
           reference_type: 'blockchain_tx',
-          chain_id: tokenInfo.chainId,
-          chain_type: tokenInfo.chainType,
+          chain_id: tokenInfo.chain_id,
+          chain_type: tokenInfo.chain_type,
           status: 'confirmed', // 初始状态为confirmed
           block_number: deposit.blockNumber,
           tx_hash: deposit.txHash,
@@ -291,8 +291,8 @@ export class TransactionAnalyzer {
         credit_type: 'deposit',
         business_type: 'blockchain',
         reference_type: 'blockchain_tx',
-        chain_id: tokenInfo.chainId,
-        chain_type: tokenInfo.chainType,
+        chain_id: tokenInfo.chain_id,
+        chain_type: tokenInfo.chain_type,
         status: 'confirmed', // 初始状态为confirmed
         block_number: deposit.blockNumber,
         tx_hash: deposit.txHash,
@@ -337,7 +337,7 @@ export class TransactionAnalyzer {
       addresses.forEach(addr => this.userAddresses.add(addr.toLowerCase()));
       this.lastAddressUpdate = Date.now();
       
-      logger.info('用户地址列表加载完成', { count: addresses.length });
+      logger.debug('用户地址列表加载完成', { count: addresses.length });
     } catch (error) {
       logger.error('加载用户地址列表失败', { error });
     }
@@ -354,7 +354,6 @@ export class TransactionAnalyzer {
       // 只获取当前链的代币
       const tokens = await tokenDAO.getTokensByChain(chainId);
       this.supportedTokens.clear();
-      
       tokens.forEach(token => {
         // 处理原生代币（如ETH）- token_address 为 null 或全零地址
         if ((!token.token_address || token.token_address === '0x0000000000000000000000000000000000000000') && token.is_native) {
@@ -367,7 +366,7 @@ export class TransactionAnalyzer {
       });
       this.lastTokenUpdate = Date.now();
       
-      logger.info('支持的代币列表加载完成', { 
+      logger.debug('支持的代币列表加载完成', { 
         chainId,
         count: tokens.length,
         nativeTokens: tokens.filter(t => t.is_native).length,
@@ -407,14 +406,17 @@ export class TransactionAnalyzer {
     try {
       const chainId = await viemClient.getChainId();
       
-      // 检查用户数量变化
-      const userCount = await database.get('SELECT COUNT(*) as count FROM wallets');
+      // 检查活跃 EVM 用户钱包数量变化
+      const userCount = await database.get(
+        'SELECT COUNT(*) as count FROM wallets WHERE chain_type = ? AND wallet_type = ? AND is_active = ?',
+        ['evm', 'user', 1]
+      );
       const tokenCount = await database.get('SELECT COUNT(*) as count FROM tokens WHERE chain_id = ?', [chainId]);
 
       let needRefresh = false;
       
       if (userCount.count !== this.lastUserCount) {
-        logger.info('检测到用户数量变化，将刷新地址缓存', {
+        logger.debug('检测到用户数量变化，将刷新地址缓存', {
           oldCount: this.lastUserCount,
           newCount: userCount.count
         });
@@ -423,7 +425,7 @@ export class TransactionAnalyzer {
       }
 
       if (tokenCount.count !== this.lastTokenCount) {
-        logger.info('检测到代币数量变化，将刷新代币缓存', {
+        logger.debug('检测到代币数量变化，将刷新代币缓存', {
           oldCount: this.lastTokenCount,
           newCount: tokenCount.count,
           chainId
@@ -447,7 +449,7 @@ export class TransactionAnalyzer {
   async refreshCache(): Promise<void> {
     await this.loadUserAddresses();
     await this.loadSupportedTokens();
-    logger.info('缓存刷新完成');
+    logger.debug('缓存刷新完成');
   }
 
   /**
@@ -543,6 +545,18 @@ export class TransactionAnalyzer {
         return null;
       }
 
+      const gasFundingTask = await fundTaskDAO.getGasFundingTaskByTxHash(tx.hash);
+      if (gasFundingTask) {
+        logger.info('跳过归集 gas 补给交易，不作为用户 ETH 充值入账', {
+          txHash: tx.hash,
+          fundTaskId: gasFundingTask.id,
+          status: gasFundingTask.status,
+          to: tx.to,
+          amount: tx.value.toString()
+        });
+        return null;
+      }
+
       // 获取用户钱包信息
       const wallet = await walletDAO.getWalletByAddress(tx.to);
       if (!wallet) {
@@ -621,7 +635,7 @@ export class TransactionAnalyzer {
    */
   async analyzeHistoricalBlocks(startBlock: number, endBlock: number): Promise<void> {
     try {
-      logger.info('开始分析历史区块（使用批量优化和事务）', { startBlock, endBlock });
+      logger.debug('开始分析历史区块（使用批量优化和事务）', { startBlock, endBlock });
 
       const batchSize = 10; // 每批处理10个区块
       for (let batchStart = startBlock; batchStart <= endBlock; batchStart += batchSize) {
@@ -652,7 +666,7 @@ export class TransactionAnalyzer {
           }
         }
 
-        logger.info('历史区块分析进度', { 
+        logger.debug('历史区块分析进度', { 
           batchStart,
           batchEnd,
           deposits: deposits.length,
@@ -660,7 +674,7 @@ export class TransactionAnalyzer {
         });
       }
 
-      logger.info('历史区块分析完成', { startBlock, endBlock });
+      logger.debug('历史区块分析完成', { startBlock, endBlock });
 
     } catch (error) {
       logger.error('分析历史区块失败', { startBlock, endBlock, error });

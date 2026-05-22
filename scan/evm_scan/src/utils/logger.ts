@@ -52,12 +52,4 @@ const logger = winston.createLogger({
   ]
 });
 
-// 开发环境的日志配置
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(new winston.transports.Console({
-    format: consoleFormat,
-    level: 'debug'
-  }));
-}
-
 export default logger;

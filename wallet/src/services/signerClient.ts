@@ -32,6 +32,9 @@ interface SignTransactionRequest {
   address: string;         // 发送方地址
   to: string;             // 接收方地址
   amount: string;         // 转账金额（最小单位）
+  userId?: number;        // 提现用户ID（风控统计使用）
+  tokenId?: number;       // 提现代币ID（风控统计使用）
+  tokenSymbol?: string;   // 提现代币符号（风控统计使用）
 
   // EVM 特定字段
   tokenAddress?: string;  // ERC20代币合约地址（可选，为空则为ETH转账）
@@ -214,7 +217,16 @@ export class SignerClient {
     request: SignTransactionRequest,
     existingOperationId?: string
   ): Promise<SignTransactionData> {
-    console.log('📥 SignerClient: 请求参数:', JSON.stringify(request, null, 2));
+    console.log('📥 SignerClient: 收到签名请求:', {
+      chainType: request.chainType,
+      chainId: request.chainId,
+      from: request.address,
+      to: request.to,
+      tokenId: request.tokenId,
+      tokenSymbol: request.tokenSymbol,
+      tokenType: request.tokenType,
+      nonce: request.nonce
+    });
 
     try {
       // 1. 生成 operation_id 和 timestamp（如果提供了 existingOperationId 则使用它）
@@ -232,6 +244,9 @@ export class SignerClient {
         from: request.address,
         to: request.to,
         amount: request.amount,
+        ...(request.userId !== undefined && { userId: request.userId }),
+        ...(request.tokenId !== undefined && { tokenId: request.tokenId }),
+        ...(request.tokenSymbol && { tokenSymbol: request.tokenSymbol }),
         chainId: request.chainId,
         chainType: request.chainType,
         nonce: normalizedNonce,
@@ -260,7 +275,14 @@ export class SignerClient {
       // 3. 生成 wallet 服务自己的签名
       const signPayload = this.buildSignaturePayload(operationId, request, normalizedNonce, timestamp);
 
-      console.log('📋 SignerClient: Wallet 签名载荷:', JSON.stringify(signPayload, null, 2));
+      console.log('📋 SignerClient: Wallet 签名载荷摘要:', {
+        operation_id: operationId,
+        chainType: signPayload.chainType,
+        from: signPayload.from,
+        to: signPayload.to,
+        chainId: signPayload.chainId,
+        nonce: signPayload.nonce
+      });
       const walletSignature = this.signMessage(JSON.stringify(signPayload));
       console.log('✅ SignerClient: Wallet 服务签名生成成功');
 

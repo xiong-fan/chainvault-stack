@@ -1,7 +1,86 @@
+import './loadEnv';  // 加载 .env 环境变量
 import { scanService } from './services/scanService';
 import { database } from './db/connection';
+import { solanaClient } from './utils/solanaClient';
+import { getDbGatewayClient } from './services/dbGatewayClient';
+import { getRiskControlClient } from './services/riskControlClient';
 import logger from './utils/logger';
 import config from './config';
+
+function hexByteLength(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const normalized = value.startsWith('0x') ? value.slice(2) : value;
+  return normalized.length / 2;
+}
+
+function validateScanKeys(): void {
+  const privateKey = process.env.SCAN_SOLANA_PRIVATE_KEY || process.env.DB_GATEWAY_SECRET;
+  const publicKey = process.env.SCAN_PUBLIC_KEY;
+
+  if (!privateKey) {
+    throw new Error('SCAN_SOLANA_PRIVATE_KEY is required (DB_GATEWAY_SECRET is supported only as legacy fallback)');
+  }
+
+  if (!/^(0x)?[0-9a-fA-F]+$/.test(privateKey) || hexByteLength(privateKey) !== 64) {
+    throw new Error(`SCAN_SOLANA_PRIVATE_KEY must be a 64-byte hex Ed25519 secret key, got ${hexByteLength(privateKey)} bytes`);
+  }
+
+  if (!publicKey) {
+    throw new Error('SCAN_PUBLIC_KEY is required for db_gateway signature verification');
+  }
+
+  if (!/^(0x)?[0-9a-fA-F]+$/.test(publicKey) || hexByteLength(publicKey) !== 32) {
+    throw new Error(`SCAN_PUBLIC_KEY must be a 32-byte hex Ed25519 public key, got ${hexByteLength(publicKey)} bytes`);
+  }
+}
+
+async function runStartupHealthChecks(): Promise<void> {
+  logger.info('执行启动健康检查...');
+
+  const checks = {
+    solanaRpc: false,
+    dbGateway: false,
+    riskControl: false,
+    sqliteReadonly: false
+  };
+
+  try {
+    await solanaClient.getLatestSlot();
+    checks.solanaRpc = true;
+  } catch (error) {
+    logger.error('Solana RPC健康检查失败', { error });
+  }
+
+  checks.dbGateway = await getDbGatewayClient().healthCheck();
+  if (!checks.dbGateway) {
+    logger.error('db_gateway健康检查失败', { url: process.env.DB_GATEWAY_URL || 'http://localhost:3003' });
+  }
+
+  checks.riskControl = await getRiskControlClient().healthCheck();
+  if (!checks.riskControl) {
+    logger.error('risk_control健康检查失败', { url: process.env.RISK_CONTROL_URL || 'http://localhost:3004' });
+  }
+
+  try {
+    await database.get('SELECT 1 as ok');
+    checks.sqliteReadonly = true;
+  } catch (error) {
+    logger.error('sqlite只读连接健康检查失败', { error });
+  }
+
+  const failedChecks = Object.entries(checks)
+    .filter(([, passed]) => !passed)
+    .map(([name]) => name);
+
+  if (failedChecks.length > 0) {
+    throw new Error(`启动健康检查失败: ${failedChecks.join(', ')}`);
+  }
+
+  logger.info('启动健康检查通过', checks);
+}
 
 /**
  * 检查是否有钱包地址需要监控
@@ -51,6 +130,8 @@ async function checkWalletAddresses(): Promise<void> {
  */
 async function initializeApp(): Promise<void> {
   try {
+    validateScanKeys();
+
     logger.info('正在初始化CEX钱包Solana扫描器...', {
       nodeVersion: process.version,
       platform: process.platform,
@@ -64,6 +145,7 @@ async function initializeApp(): Promise<void> {
 
     // 检查钱包地址
     await checkWalletAddresses();
+    await runStartupHealthChecks();
 
     // 自动启动扫描服务
     if (process.env.AUTO_START !== 'false') {

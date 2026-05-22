@@ -90,3 +90,59 @@ CREATE INDEX IF NOT EXISTS idx_address_risk_address ON address_risk_list(address
 CREATE INDEX IF NOT EXISTS idx_address_risk_chain_type ON address_risk_list(chain_type);
 CREATE INDEX IF NOT EXISTS idx_address_risk_type ON address_risk_list(risk_type);
 CREATE INDEX IF NOT EXISTS idx_address_risk_enabled ON address_risk_list(enabled);
+
+
+-- 4. 提现风控规则配置表 (withdraw_risk_rules)
+CREATE TABLE IF NOT EXISTS withdraw_risk_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+
+  chain_type TEXT,                         -- evm/btc/solana，NULL 表示任意链类型
+  chain_id INTEGER,                        -- NULL 表示任意链 ID
+  token_symbol TEXT,                       -- NULL 表示任意代币
+  token_id INTEGER,                        -- NULL 表示任意 token_id
+
+  single_withdraw_limit TEXT NOT NULL,     -- 单笔提现上限（最小单位）
+  daily_withdraw_limit TEXT NOT NULL,      -- 单日提现累计上限（最小单位）
+  frequency_window_seconds INTEGER NOT NULL DEFAULT 3600,
+  frequency_max_count INTEGER NOT NULL DEFAULT 5,
+  limit_action TEXT NOT NULL DEFAULT 'manual_review', -- manual_review/reject
+
+  enabled INTEGER DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 100,   -- 数字越小优先级越高
+
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_withdraw_risk_rules_enabled ON withdraw_risk_rules(enabled);
+CREATE INDEX IF NOT EXISTS idx_withdraw_risk_rules_scope ON withdraw_risk_rules(chain_type, chain_id, token_symbol, token_id);
+CREATE INDEX IF NOT EXISTS idx_withdraw_risk_rules_priority ON withdraw_risk_rules(priority);
+
+INSERT OR IGNORE INTO withdraw_risk_rules (
+  name,
+  chain_type,
+  chain_id,
+  token_symbol,
+  token_id,
+  single_withdraw_limit,
+  daily_withdraw_limit,
+  frequency_window_seconds,
+  frequency_max_count,
+  limit_action,
+  enabled,
+  priority
+) VALUES (
+  'default',
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  '1000000000000000000',
+  '3000000000000000000',
+  3600,
+  5,
+  'manual_review',
+  1,
+  1000
+);

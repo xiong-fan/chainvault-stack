@@ -37,19 +37,19 @@ export class ScanService {
     }
 
     try {
-      logger.info('正在启动扫描服务...');
+      logger.debug('正在启动扫描服务...');
 
       // 初始化数据库
       await database.initialize();
 
       // 加载用户地址和代币信息
       await transactionAnalyzer.refreshCache();
-
+      
       // 启动区块扫描器
       await blockScanner.startScanning();
 
       this.isRunning = true;
-      logger.info('扫描服务启动成功', {
+      logger.debug('扫描服务启动成功', {
         startBlock: config.startBlock,
         scanBatchSize: config.scanBatchSize,
         confirmationBlocks: config.confirmationBlocks,
@@ -71,14 +71,14 @@ export class ScanService {
       return;
     }
 
-    logger.info('正在停止扫描服务...');
+    logger.debug('正在停止扫描服务...');
 
     try {
       // 停止区块扫描器
       blockScanner.stopScanning();
 
       this.isRunning = false;
-      logger.info('扫描服务已停止');
+      logger.debug('扫描服务已停止');
 
     } catch (error) {
       logger.error('停止扫描服务失败', { error });
@@ -89,7 +89,7 @@ export class ScanService {
    * 刷新缓存
    */
   async refreshCache(): Promise<void> {
-    logger.info('刷新缓存');
+    logger.debug('刷新缓存');
     await transactionAnalyzer.refreshCache();
   }
 
@@ -119,7 +119,7 @@ export class ScanService {
    */
   async rescanBlocks(startBlock: number, endBlock: number): Promise<void> {
     try {
-      logger.info('开始补扫区块', { startBlock, endBlock });
+      logger.debug('开始补扫区块', { startBlock, endBlock });
 
       if (startBlock > endBlock) {
         throw new Error('起始区块不能大于结束区块');
@@ -132,7 +132,7 @@ export class ScanService {
       // 分析历史区块
       await transactionAnalyzer.analyzeHistoricalBlocks(startBlock, endBlock);
 
-      logger.info('补扫区块完成', { startBlock, endBlock });
+      logger.debug('补扫区块完成', { startBlock, endBlock });
 
     } catch (error) {
       logger.error('补扫区块失败', { startBlock, endBlock, error });

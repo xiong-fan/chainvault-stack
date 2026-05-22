@@ -1,3 +1,9 @@
+---
+title: mocked_users
+type: note
+permalink: cex-wallet/wallet/mock/mocked-users
+---
+
 [INFO] 用户 1 EVM 钱包创建成功: {
   id: 1,
   user_id: 1,

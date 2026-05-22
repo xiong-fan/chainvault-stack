@@ -7,6 +7,7 @@ export interface User {
   email: string;
   phone?: string;
   password_hash: string;
+  user_type: string;
   status: 0 | 1 | 2; // 0:正常，1:禁用，2:待审核
   kyc_status: 0 | 1 | 2 | 3; // 0:未认证，1:待审核，2:已认证，3:认证失败
   created_at?: string;
@@ -39,6 +40,7 @@ export interface UpdateUserRequest {
 export interface UserQueryOptions {
   status?: 0 | 1 | 2;
   kyc_status?: 0 | 1 | 2 | 3;
+  user_type?: string;
   limit?: number | undefined;
   offset?: number | undefined;
   orderBy?: 'created_at' | 'last_login_at' | 'username';
@@ -94,6 +96,11 @@ export class UserModel {
     if (options?.kyc_status !== undefined) {
       sql += ' AND kyc_status = ?';
       params.push(options.kyc_status);
+    }
+
+    if (options?.user_type !== undefined) {
+      sql += ' AND user_type = ?';
+      params.push(options.user_type);
     }
 
     // 添加排序
@@ -185,7 +192,7 @@ export class UserModel {
   // 获取安全的用户信息（不包含密码哈希）
   async findByIdSafe(id: number): Promise<Omit<User, 'password_hash'> | null> {
     const user = await this.db.queryOne<Omit<User, 'password_hash'>>(
-      'SELECT id, username, email, phone, status, kyc_status, created_at, updated_at, last_login_at FROM users WHERE id = ?',
+      'SELECT id, username, email, phone, user_type, status, kyc_status, created_at, updated_at, last_login_at FROM users WHERE id = ?',
       [id]
     );
     return user || null;
@@ -193,7 +200,7 @@ export class UserModel {
 
   // 获取所有安全的用户信息（不包含密码哈希）
   async findAllSafe(options?: UserQueryOptions): Promise<Omit<User, 'password_hash'>[]> {
-    let sql = 'SELECT id, username, email, phone, status, kyc_status, created_at, updated_at, last_login_at FROM users WHERE 1=1';
+    let sql = 'SELECT id, username, email, phone, user_type, status, kyc_status, created_at, updated_at, last_login_at FROM users WHERE 1=1';
     const params: any[] = [];
 
     // 添加过滤条件
@@ -205,6 +212,11 @@ export class UserModel {
     if (options?.kyc_status !== undefined) {
       sql += ' AND kyc_status = ?';
       params.push(options.kyc_status);
+    }
+
+    if (options?.user_type !== undefined) {
+      sql += ' AND user_type = ?';
+      params.push(options.user_type);
     }
 
     // 添加排序

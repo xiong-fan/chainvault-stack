@@ -55,6 +55,9 @@ export interface SignRequest {
   address: string;
   to: string;
   amount: string;
+  userId?: number;
+  tokenId?: number;
+  tokenSymbol?: string;
   tokenAddress?: string;
   chainId: number;
   chainType: 'evm' | 'btc' | 'solana';
@@ -70,6 +73,11 @@ export interface SignRequest {
   lastValidBlockHeight?: string;
   
   fee?: string;
+}
+
+export interface SignedTransactionResult {
+  signedTransaction: string;
+  transactionHash: string;
 }
 
 export interface WithdrawResult {
@@ -123,6 +131,20 @@ export interface IWithdrawHandler {
     signedTransaction: string,
     context: WithdrawContext
   ): Promise<string>;
+
+  /**
+   * 完整签名并发送交易。EVM 实现会在 nonce too low 时同步链上 nonce 并有限重试一次。
+   */
+  signAndSendTransaction?(
+    context: WithdrawContext,
+    transactionParams: TransactionParams,
+    tokenInfo: any,
+    signTransaction: (signRequest: SignRequest) => Promise<SignedTransactionResult>
+  ): Promise<{
+    signedTransaction: string;
+    transactionHash: string;
+    nonce: number;
+  }>;
 
   /**
    * 发送交易后的清理工作（如标记 nonce 已使用）

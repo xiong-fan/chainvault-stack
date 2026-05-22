@@ -4,17 +4,22 @@ import { ManualReviewService } from '../services/manual-review';
 import { RiskAssessmentRequest } from '../types';
 import { logger } from '../utils/logger';
 import { riskControlDB } from '../db/connection';
-import { RiskAssessmentModel, AddressRiskModel } from '../db/models';
+import { RiskAssessmentModel, AddressRiskModel, WithdrawRiskRuleModel } from '../db/models';
+import { WithdrawalRiskRuleService } from '../services/withdraw-risk-rules';
 
 export class RiskController {
   private manualReviewService: ManualReviewService;
   private riskAssessmentModel: RiskAssessmentModel;
   private addressRiskModel: AddressRiskModel;
+  private withdrawRiskRuleModel: WithdrawRiskRuleModel;
+  private withdrawalRiskRuleService: WithdrawalRiskRuleService;
 
   constructor(private riskService: RiskAssessmentService) {
     this.manualReviewService = new ManualReviewService(riskService);
     this.riskAssessmentModel = new RiskAssessmentModel(riskControlDB);
     this.addressRiskModel = new AddressRiskModel(riskControlDB);
+    this.withdrawRiskRuleModel = new WithdrawRiskRuleModel(riskControlDB);
+    this.withdrawalRiskRuleService = new WithdrawalRiskRuleService();
   }
 
   /**
@@ -194,6 +199,166 @@ export class RiskController {
     }
   };
 
+  getWithdrawRiskRules = async (_req: Request, res: Response) => {
+    try {
+      const rules = await this.withdrawRiskRuleModel.findAll();
+      return res.status(200).json({ success: true, data: rules });
+    } catch (error) {
+      logger.error('Get withdraw risk rules endpoint error', { error });
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+    }
+  };
+
+  updateWithdrawRiskRule = async (req: Request, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_REQUEST', message: 'Invalid rule id' }
+        });
+      }
+
+      const allowedFields = [
+        'name',
+        'chain_type',
+        'chain_id',
+        'token_symbol',
+        'token_id',
+        'single_withdraw_limit',
+        'daily_withdraw_limit',
+        'frequency_window_seconds',
+        'frequency_max_count',
+        'limit_action',
+        'enabled',
+        'priority'
+      ];
+      const data: Record<string, unknown> = {};
+      for (const field of allowedFields) {
+        if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+          data[field] = req.body[field];
+        }
+      }
+
+      if (data.single_withdraw_limit !== undefined) data.single_withdraw_limit = String(data.single_withdraw_limit);
+      if (data.daily_withdraw_limit !== undefined) data.daily_withdraw_limit = String(data.daily_withdraw_limit);
+      if (data.frequency_window_seconds !== undefined) data.frequency_window_seconds = Number(data.frequency_window_seconds);
+      if (data.frequency_max_count !== undefined) data.frequency_max_count = Number(data.frequency_max_count);
+      if (data.enabled !== undefined) data.enabled = Number(data.enabled) ? 1 : 0;
+      if (data.priority !== undefined) data.priority = Number(data.priority);
+      if (data.limit_action !== undefined && !['manual_review', 'reject'].includes(String(data.limit_action))) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_REQUEST', message: 'limit_action must be manual_review or reject' }
+        });
+      }
+
+      await this.withdrawRiskRuleModel.update(id, data as any);
+      const rules = await this.withdrawRiskRuleModel.findAll();
+      return res.status(200).json({ success: true, data: rules.find(rule => rule.id === id) || null });
+    } catch (error) {
+      logger.error('Update withdraw risk rule endpoint error', { error, body: req.body });
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+    }
+  };
+
+  getAddressRisks = async (req: Request, res: Response) => {
+    try {
+      const enabled = req.query.enabled === undefined ? undefined : (req.query.enabled === '1' ? 1 : 0);
+      const addresses = await this.addressRiskModel.findAll({
+        chainType: req.query.chain_type as string | undefined,
+        riskType: req.query.risk_type as string | undefined,
+        enabled,
+        limit: req.query.limit ? Number(req.query.limit) : 100
+      });
+      return res.status(200).json({ success: true, data: addresses });
+    } catch (error) {
+      logger.error('Get address risks endpoint error', { error });
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+    }
+  };
+
+  createAddressRisk = async (req: Request, res: Response) => {
+    try {
+      const { address, chain_type, risk_type, risk_level, reason, source, enabled } = req.body;
+      if (!address || !chain_type || !risk_type) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_REQUEST', message: 'address, chain_type and risk_type are required' }
+        });
+      }
+
+      const id = await this.addressRiskModel.create({
+        address,
+        chain_type,
+        risk_type,
+        risk_level: risk_level || 'medium',
+        reason,
+        source: source || 'manual',
+        enabled: enabled === undefined ? 1 : Number(enabled) ? 1 : 0
+      });
+
+      return res.status(201).json({ success: true, data: { id } });
+    } catch (error) {
+      logger.error('Create address risk endpoint error', { error, body: req.body });
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+    }
+  };
+
+  updateAddressRiskEnabled = async (req: Request, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      const enabled = Number(req.body.enabled) ? 1 : 0;
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_REQUEST', message: 'Invalid address risk id' }
+        });
+      }
+
+      await this.addressRiskModel.toggleEnabled(id, enabled);
+      return res.status(200).json({ success: true, data: { id, enabled } });
+    } catch (error) {
+      logger.error('Update address risk enabled endpoint error', { error, body: req.body });
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
+      });
+    }
+  };
+
   /**
    * 对提现进行风险评估并签名
    */
@@ -233,6 +398,9 @@ export class RiskController {
         from,
         to,
         amount,
+        userId,
+        tokenId,
+        tokenSymbol,
         tokenAddress,
         tokenType,
         chainId,
@@ -240,13 +408,18 @@ export class RiskController {
         nonce,
         blockhash,
         lastValidBlockHeight,
-        fee
+        fee,
+        businessType
       } = transaction;
+      const normalizedBusinessType = businessType === 'collect' ? 'collect' : 'withdraw';
 
       logger.info('📋 Risk: 提取的交易字段', {
         from,
         to,
         amount,
+        userId: userId || null,
+        tokenId: tokenId || null,
+        tokenSymbol: tokenSymbol || null,
         tokenAddress: tokenAddress || null,
         tokenType: tokenType || null,
         chainId,
@@ -254,7 +427,8 @@ export class RiskController {
         nonce,
         blockhash: blockhash || null,
         lastValidBlockHeight: lastValidBlockHeight || null,
-        fee: fee || null
+        fee: fee || null,
+        businessType: normalizedBusinessType
       });
 
       if (!from || !to || !amount || chainId === undefined || nonce === undefined) {
@@ -378,33 +552,31 @@ export class RiskController {
         from,
         to,
         amount,
-        chainType: normalizedChainType
+        chainType: normalizedChainType,
+        businessType: normalizedBusinessType
       });
 
-      let decision: 'approve' | 'freeze' | 'reject' | 'manual_review' = 'approve'; // 默认批准
-      const reasons: string[] = [];
-      let riskLevel: 'low' | 'medium' | 'high' | 'critical' = 'low';
-
-      // 1. 检查目标地址黑名单
-      logger.info('🔍 Risk: 检查目标地址黑名单', { to, chainType: normalizedChainType });
-      const addressRisk = await this.addressRiskModel.checkAddress(to, normalizedChainType);
-
-      if (addressRisk && addressRisk.risk_type === 'blacklist') {
-        decision = 'reject';
-        reasons.push(`目标地址在黑名单中: ${addressRisk.reason || '未知原因'}`);
-        riskLevel = 'critical';
-
-        logger.warn('Withdraw rejected - blacklisted address', {
-          operation_id,
-          to,
-          reason: addressRisk.reason
-        });
-      }
-
-      // TODO: 可以添加更多风控规则
-      // 2. 检查金额限制
-      // 3. 检查频率限制
-      // 4. 检查单日额度
+      const withdrawalRisk = normalizedBusinessType === 'collect'
+        ? {
+            decision: 'approve' as const,
+            reasons: ['System fund collection bypasses user withdraw limits'],
+            risk_level: 'low' as const
+          }
+        : await this.withdrawalRiskRuleService.evaluate({
+            operation_id,
+            user_id: userId,
+            from,
+            to,
+            amount,
+            chainType: normalizedChainType,
+            chainId,
+            tokenSymbol,
+            tokenId,
+            timestamp
+          });
+      const decision = withdrawalRisk.decision;
+      const reasons = withdrawalRisk.reasons;
+      const riskLevel = withdrawalRisk.risk_level;
 
       // 如果被拒绝，直接返回，不生成签名
       if (decision === 'reject') {
@@ -442,21 +614,30 @@ export class RiskController {
 
         logger.info('📋 Risk 拒绝操作的签名载荷:', denySignaturePayload);
 
-        // 记录到数据库
-        await this.riskAssessmentModel.create({
+        const existingDeniedAssessment = await this.riskAssessmentModel.findByOperationId(operation_id);
+        const deniedAssessmentData = {
           operation_id,
           table_name: undefined,
-          action: 'withdraw',
+          action: normalizedBusinessType,
+          user_id: userId,
           operation_data: JSON.stringify(denySignaturePayload),
           risk_level: riskLevel,
           decision: 'deny',
+          approval_status: undefined,
           reasons: reasons.length > 0 ? JSON.stringify(reasons) : undefined,
           risk_signature: undefined,  // 不生成签名
           expires_at: undefined
-        });
+        } as const;
 
-        logger.info('Withdraw risk assessment completed - REJECTED', {
+        if (existingDeniedAssessment?.id) {
+          await this.riskAssessmentModel.update(existingDeniedAssessment.id, deniedAssessmentData);
+        } else {
+          await this.riskAssessmentModel.create(deniedAssessmentData);
+        }
+
+        logger.info('Transaction risk assessment completed - REJECTED', {
           operation_id,
+          businessType: normalizedBusinessType,
           from,
           to,
           amount,
@@ -473,9 +654,73 @@ export class RiskController {
           reasons,
           error: {
             code: 'RISK_REJECTED',
-            message: '提现被风控拒绝',
+            message: normalizedBusinessType === 'collect' ? '归集被风控拒绝' : '提现被风控拒绝',
             details: reasons.join('; ')
           }
+        });
+      }
+
+      if (decision === 'manual_review') {
+        const reviewPayload = this.buildSignaturePayload({
+          operation_id,
+          chainType: normalizedChainType,
+          from,
+          to,
+          amount,
+          tokenAddress,
+          tokenType,
+          chainId,
+          nonce,
+          blockhash,
+          lastValidBlockHeight,
+          fee,
+          timestamp
+        });
+
+        const existingReviewAssessment = await this.riskAssessmentModel.findByOperationId(operation_id);
+        const reviewAssessmentData = {
+          operation_id,
+          table_name: undefined,
+          action: normalizedBusinessType,
+          user_id: userId,
+          operation_data: JSON.stringify({
+            ...reviewPayload,
+            user_id: userId ?? null,
+            userId: userId ?? null,
+            token_id: tokenId ?? null,
+            tokenId: tokenId ?? null,
+            tokenSymbol: tokenSymbol ?? null,
+            businessType: normalizedBusinessType
+          }),
+          risk_level: riskLevel,
+          decision: 'manual_review',
+          approval_status: 'pending',
+          reasons: reasons.length > 0 ? JSON.stringify(reasons) : undefined,
+          risk_signature: undefined,
+          expires_at: undefined
+        } as const;
+
+        if (existingReviewAssessment?.id) {
+          await this.riskAssessmentModel.update(existingReviewAssessment.id, reviewAssessmentData);
+        } else {
+          await this.riskAssessmentModel.create(reviewAssessmentData);
+        }
+
+        logger.info('Transaction risk assessment requires manual review', {
+          operation_id,
+          businessType: normalizedBusinessType,
+          from,
+          to,
+          amount,
+          risk_level: riskLevel,
+          reasons
+        });
+
+        return res.status(202).json({
+          success: true,
+          decision,
+          timestamp,
+          reasons
         });
       }
 
@@ -527,12 +772,15 @@ export class RiskController {
       // 计算签名过期时间（5分钟后）
       const expiresAt = new Date(timestamp + 5 * 60 * 1000).toISOString();
 
-      await this.riskAssessmentModel.create({
+      const existingApprovedAssessment = await this.riskAssessmentModel.findByOperationId(operation_id);
+      const approvedAssessmentData = {
         operation_id,
         table_name: undefined,  // 提现不对应具体数据库表
-        action: 'withdraw',
+        action: normalizedBusinessType,
+        user_id: userId,
         operation_data: JSON.stringify(
-          this.buildSignaturePayload({
+          {
+            ...this.buildSignaturePayload({
             operation_id,
             chainType: normalizedChainType,
             from,
@@ -546,17 +794,31 @@ export class RiskController {
             lastValidBlockHeight,
             fee,
             timestamp
-          })
+            }),
+            user_id: userId ?? null,
+            userId: userId ?? null,
+            token_id: tokenId ?? null,
+            tokenId: tokenId ?? null,
+            tokenSymbol: tokenSymbol ?? null,
+            businessType: normalizedBusinessType
+          }
         ),
         risk_level: riskLevel,
         decision: decision === 'approve' ? 'auto_approve' : 'manual_review',
         reasons: reasons.length > 0 ? JSON.stringify(reasons) : undefined,
         risk_signature: riskSignature,
         expires_at: expiresAt
-      });
+      } as const;
 
-      logger.info('Withdraw risk assessment completed - APPROVED', {
+      if (existingApprovedAssessment?.id) {
+        await this.riskAssessmentModel.update(existingApprovedAssessment.id, approvedAssessmentData);
+      } else {
+        await this.riskAssessmentModel.create(approvedAssessmentData);
+      }
+
+      logger.info('Transaction risk assessment completed - APPROVED', {
         operation_id,
+        businessType: normalizedBusinessType,
         from,
         to,
         amount,

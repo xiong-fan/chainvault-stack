@@ -148,6 +148,26 @@ export class DatabaseConnection {
     return result || null;
   }
 
+  async findTokenBySymbolAndChainType(symbol: string, chainId: number, chainType: string): Promise<{
+    id: number;
+    chain_type: string;
+    chain_id: number;
+    token_address: string | null;
+    token_symbol: string;
+    token_name: string | null;
+    token_type: string | null;
+    decimals: number;
+    is_native: boolean;
+    withdraw_fee: string;
+    min_withdraw_amount: string;
+  } | null> {
+    const result = await this.queryOne(
+      'SELECT id, chain_type, chain_id, token_address, token_symbol, token_name, token_type, decimals, is_native, withdraw_fee, min_withdraw_amount FROM tokens WHERE token_symbol = ? AND chain_id = ? AND chain_type = ? AND status = 1 LIMIT 1',
+      [symbol, chainId, chainType]
+    );
+    return result || null;
+  }
+
   // 通过代币地址查找代币信息
   async findTokenByAddress(address: string): Promise<{
     id: number;

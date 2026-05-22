@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/signer/readme
+---
+
 # CEX钱包系统 - 签名器模块
 
 签名器模块负责从环境变量助记词创建钱包，使用 viem.sh 库实现以太坊钱包的创建和操作。该模块专为 CEX 钱包系统设计，提供安全的地址生成服务。
@@ -250,4 +256,3 @@ curl -X POST http://localhost:3001/api/signer/create \
 # 运行测试
 npm test
 ```
- 

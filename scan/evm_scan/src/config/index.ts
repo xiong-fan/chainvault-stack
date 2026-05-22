@@ -1,8 +1,13 @@
-import dotenv from 'dotenv';
-import path from 'path';
+// import dotenv from 'dotenv';
+// import path from 'path';
 
-// 加载环境变量
-dotenv.config();
+
+// // 加载根目录的 keys.env
+// dotenv.config({ path: path.resolve(process.cwd(), '../key.env') });
+
+// // 再加载本模块自己的 .env（覆盖优先级更高）
+// dotenv.config(); // 默认加载本目录 .env
+
 
 export interface Config {
   // 以太坊节点配置

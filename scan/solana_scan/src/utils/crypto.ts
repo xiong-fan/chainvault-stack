@@ -3,10 +3,11 @@ import * as nacl from 'tweetnacl';
 export interface SignaturePayload {
   operation_id: string;
   operation_type: string;
-  table: string;
-  action: string;
-  data: any;
-  conditions: any;
+  table?: string;
+  action?: string;
+  data?: any;
+  conditions?: any;
+  operations?: any[];
   timestamp: number;
 }
 
@@ -15,23 +16,18 @@ export class Ed25519Signer {
   private publicKey: Uint8Array;
 
   constructor() {
-    // 从环境变量读取私钥，或者生成新的密钥对
-    const privateKeyHex = process.env.DB_GATEWAY_SECRET;
+    const privateKeyHex = process.env.SCAN_SOLANA_PRIVATE_KEY || process.env.DB_GATEWAY_SECRET;
 
     if (privateKeyHex) {
-      // 从十六进制字符串解析私钥
       this.secretKey = this.hexToUint8Array(privateKeyHex);
-      // 从私钥提取公钥（Ed25519 私钥是 64 字节，后 32 字节是公钥）
+
+      if (this.secretKey.length !== 64) {
+        throw new Error(`Solana scan private key must be 64 bytes, got ${this.secretKey.length}`);
+      }
+
       this.publicKey = this.secretKey.slice(32, 64);
     } else {
-      // 生成新密钥对
-      const keyPair = nacl.sign.keyPair();
-      this.secretKey = keyPair.secretKey;
-      this.publicKey = keyPair.publicKey;
-
-      console.warn('警告: DB_GATEWAY_SECRET 未配置，已生成临时密钥对');
-      console.warn('公钥 (hex):', this.uint8ArrayToHex(this.publicKey));
-      console.warn('私钥 (hex):', this.uint8ArrayToHex(this.secretKey));
+      throw new Error('SCAN_SOLANA_PRIVATE_KEY is required for Solana scan signing (DB_GATEWAY_SECRET is supported only as legacy fallback)');
     }
   }
 
@@ -67,6 +63,16 @@ export class Ed25519Signer {
    * 必须与 db_gateway 使用的顺序保持一致
    */
   private serializePayload(payload: SignaturePayload): string {
+    if (payload.operations) {
+      return JSON.stringify({
+        operation_id: payload.operation_id,
+        operation_type: payload.operation_type,
+        data: null,
+        conditions: null,
+        timestamp: payload.timestamp
+      });
+    }
+
     return JSON.stringify({
       operation_id: payload.operation_id,
       operation_type: payload.operation_type,
@@ -91,6 +97,14 @@ export class Ed25519Signer {
    * 将十六进制字符串转换为 Uint8Array
    */
   private hexToUint8Array(hex: string): Uint8Array {
+    if (hex.startsWith('0x')) {
+      hex = hex.slice(2);
+    }
+
+    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) {
+      throw new Error('Invalid hex string');
+    }
+
     const matches = hex.match(/.{1,2}/g);
     if (!matches) {
       throw new Error('Invalid hex string');

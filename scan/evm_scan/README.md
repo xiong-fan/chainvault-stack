@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/scan/evm-scan/readme
+---
+
 # CEX钱包系统 - 区块链扫描器
 
 以太坊区块链扫描器后台服务，用于监控用户钱包地址的存款交易，支持ETH和ERC20代币，具备区块重组检测和确认机制。 
@@ -285,4 +291,3 @@ npm test
 # 测试特定功能
 curl http://localhost:3002/api/scan/status
 ```
-

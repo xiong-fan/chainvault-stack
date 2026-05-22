@@ -1,3 +1,9 @@
+---
+title: database
+type: note
+permalink: cex-wallet/db-gateway/database
+---
+
 ## 数据库结构
 
 ### db/schema.sql

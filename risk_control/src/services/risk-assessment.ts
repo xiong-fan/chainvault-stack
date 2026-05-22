@@ -5,24 +5,23 @@ import {
   RiskAssessmentRequest,
   RiskAssessmentResponse,
   RiskDecision,
-  SignaturePayload,
-  BlacklistAddress
+  SignaturePayload
 } from '../types';
 import { riskControlDB } from '../db/connection';
 import { RiskAssessmentModel, AddressRiskModel } from '../db/models';
+import { WithdrawalRiskRuleService } from './withdraw-risk-rules';
 
 export class RiskAssessmentService {
   private signer: Ed25519Signer;
   private assessmentModel: RiskAssessmentModel;
   private addressRiskModel: AddressRiskModel;
-
-  // 大额交易阈值（单位：wei，测试设置为 1 ETH， 应该用数据库定义规则）
-  private readonly LARGE_AMOUNT_THRESHOLD = BigInt('1000000000000000000');
+  private withdrawalRiskRuleService: WithdrawalRiskRuleService;
 
   constructor(privateKeyHex: string) {
     this.signer = new Ed25519Signer(privateKeyHex);
     this.assessmentModel = new RiskAssessmentModel(riskControlDB);
     this.addressRiskModel = new AddressRiskModel(riskControlDB);
+    this.withdrawalRiskRuleService = new WithdrawalRiskRuleService();
 
     logger.info('Risk Assessment Service initialized', {
       publicKey: this.signer.getPublicKeyHex()
@@ -174,12 +173,52 @@ export class RiskAssessmentService {
     let suggestData: any = undefined;
     let suggestReason: string | undefined = undefined;
 
-    // 规则1: 检查黑名单地址
     const fromAddress = ctx.from_address || request.data?.from_address;
     const creditType = ctx.credit_type || request.data?.credit_type;
+    const toAddress = ctx.to_address || request.data?.to_address;
+    const amount = ctx.amount || request.data?.amount;
+    const isWithdraw = creditType === 'withdraw' || request.table === 'withdraws';
 
-    console.log('fromAddress', fromAddress);
-    console.log('creditType', creditType);
+    if (isWithdraw && amount && toAddress) {
+      const chainType: 'evm' | 'btc' | 'solana' =
+        ctx.chain_type === 'solana' || request.data?.chain_type === 'solana'
+          ? 'solana'
+          : ctx.chain_type === 'btc' || request.data?.chain_type === 'btc'
+            ? 'btc'
+            : 'evm';
+
+      const withdrawalRisk = await this.withdrawalRiskRuleService.evaluate({
+        operation_id: request.operation_id,
+        user_id: ctx.user_id || request.data?.user_id,
+        from: fromAddress,
+        to: toAddress,
+        amount,
+        chainType,
+        chainId: ctx.chain_id || request.data?.chain_id,
+        tokenSymbol: ctx.token_symbol || request.data?.token_symbol,
+        tokenId: ctx.token_id || request.data?.token_id,
+        timestamp: request.timestamp
+      });
+
+      if (withdrawalRisk.decision === 'manual_review') {
+        const suggestedAmount = withdrawalRisk.rule?.single_withdraw_limit;
+        if (suggestedAmount) {
+          suggestData = {
+            ...request.data,
+            amount: suggestedAmount
+          };
+          suggestReason = `提现触发风控规则，建议单笔金额不超过: ${suggestedAmount}`;
+        }
+      }
+
+      return {
+        decision: withdrawalRisk.decision,
+        risk_level: withdrawalRisk.risk_level,
+        reasons: withdrawalRisk.reasons,
+        suggestData,
+        suggestReason
+      };
+    }
 
     // 检查 from_address（主要用于存款场景）
     if (fromAddress) {
@@ -211,7 +250,6 @@ export class RiskAssessmentService {
     }
 
     // 检查 to_address（主要用于提现场景）
-    const toAddress = ctx.to_address || request.data?.to_address;
     if (toAddress) {
       const chainType = ctx.chain_type || 'evm';
       const riskInfo = await this.addressRiskModel.checkAddress(toAddress, chainType);
@@ -225,38 +263,6 @@ export class RiskAssessmentService {
           suggestData,
           suggestReason
         };
-      }
-    }
-
-    // 规则2: 检查大额提现 - 人工审核（只检查提现，不检查存款）
-    const amount = ctx.amount || request.data?.amount;
-    const isWithdraw = creditType === 'withdraw' || request.table === 'withdraws';
-
-    if (amount && isWithdraw) {
-      try {
-        const amountBigInt = BigInt(amount);
-        if (amountBigInt > this.LARGE_AMOUNT_THRESHOLD) {
-          reasons.push(`Large amount withdrawal: ${amount}`);
-          reasons.push('Manual review required');
-
-          // 生成建议数据：建议减少金额到阈值以下
-          const suggestedAmount = this.LARGE_AMOUNT_THRESHOLD.toString();
-          suggestData = {
-            ...request.data,
-            amount: suggestedAmount
-          };
-          suggestReason = `建议金额过大，建议分批提现，单次建议金额: ${suggestedAmount}`;
-
-          return {
-            decision: 'manual_review',
-            risk_level: 'high',
-            reasons,
-            suggestData,
-            suggestReason
-          };
-        }
-      } catch (error) {
-        logger.warn('Failed to parse amount', { amount });
       }
     }
 

@@ -1,7 +1,7 @@
 import { mnemonicToSeedSync } from '@scure/bip39';
 import { derivePath } from 'ed25519-hd-key';
 import {
-  appendTransactionMessageInstruction,
+  appendTransactionMessageInstructions,
   createKeyPairSignerFromPrivateKeyBytes,
   createTransactionMessage,
   getBase64EncodedWireTransaction,
@@ -11,8 +11,13 @@ import {
   signTransactionMessageWithSigners,
   address as solanaAddress
 } from '@solana/kit';
-import { getTransferSolInstruction } from '@solana-program/system';
-import { findAssociatedTokenPda, getTransferInstruction, TOKEN_PROGRAM_ADDRESS } from '@solana-program/token';
+import { getTransferSolInstruction, SYSTEM_PROGRAM_ADDRESS } from '@solana-program/system';
+import {
+  findAssociatedTokenPda,
+  getCreateAssociatedTokenIdempotentInstruction,
+  getTransferInstruction,
+  TOKEN_PROGRAM_ADDRESS
+} from '@solana-program/token';
 import bs58 from 'bs58';
 import { SignTransactionRequest, SignTransactionResponse } from '../../types/wallet';
 import { DatabaseConnection } from '../../db/connection';
@@ -78,7 +83,7 @@ export async function signSolanaTransaction(
     };
   }
 
-  const instruction = await buildInstruction(request, solanaSigner);
+  const instructions = await buildInstructions(request, solanaSigner);
 
   const lifetimeConstraint = {
     blockhash: request.blockhash as any,
@@ -89,7 +94,7 @@ export async function signSolanaTransaction(
     createTransactionMessage({ version: 0 }),
     tx => setTransactionMessageFeePayerSigner(solanaSigner, tx),
     tx => setTransactionMessageLifetimeUsingBlockhash(lifetimeConstraint, tx),
-    tx => appendTransactionMessageInstruction(instruction, tx)
+    tx => appendTransactionMessageInstructions(instructions, tx)
   );
 
   console.log('✅ Solana 交易消息构建完成');
@@ -121,7 +126,7 @@ export async function signSolanaTransaction(
   };
 }
 
-async function buildInstruction(request: SignTransactionRequest, solanaSigner: any) {
+async function buildInstructions(request: SignTransactionRequest, solanaSigner: any) {
   if (request.tokenAddress) {
     console.log('📦 构建 SPL Token 转账指令');
 
@@ -140,7 +145,18 @@ async function buildInstruction(request: SignTransactionRequest, solanaSigner: a
       tokenProgram: tokenProgramAddress
     });
 
-    const baseInstruction = getTransferInstruction({
+    // 归集/提现时目标 ATA 可能只在业务库中有映射、链上尚未创建。
+    // 使用 idempotent 创建指令和转账放在同一笔交易里，已存在时不会报错，不存在时由付款方先创建。
+    const createDestinationAtaInstruction = getCreateAssociatedTokenIdempotentInstruction({
+      payer: solanaSigner,
+      ata: destAta,
+      owner: solanaAddress(request.to),
+      mint: solanaAddress(request.tokenAddress),
+      systemProgram: SYSTEM_PROGRAM_ADDRESS,
+      tokenProgram: tokenProgramAddress
+    });
+
+    const transferInstruction = getTransferInstruction({
       source: sourceAta,
       destination: destAta,
       authority: solanaSigner,
@@ -148,22 +164,27 @@ async function buildInstruction(request: SignTransactionRequest, solanaSigner: a
     });
 
     if (request.tokenType === 'spl-token-2022') {
-      return {
-        ...baseInstruction,
-        programAddress: tokenProgramAddress
-      } as typeof baseInstruction;
+      return [
+        createDestinationAtaInstruction,
+        {
+          ...transferInstruction,
+          programAddress: tokenProgramAddress
+        } as typeof transferInstruction
+      ];
     }
 
-    return baseInstruction;
+    return [createDestinationAtaInstruction, transferInstruction];
   }
 
   console.log('💎 构建 SOL 转账指令');
 
-  return getTransferSolInstruction({
-    source: solanaSigner,
-    destination: solanaAddress(request.to),
-    amount: BigInt(request.amount)
-  });
+  return [
+    getTransferSolInstruction({
+      source: solanaSigner,
+      destination: solanaAddress(request.to),
+      amount: BigInt(request.amount)
+    })
+  ];
 }
 
 export async function deriveSolanaSignerFromPath(

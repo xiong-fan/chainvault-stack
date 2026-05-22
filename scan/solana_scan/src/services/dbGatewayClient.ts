@@ -26,6 +26,24 @@ interface GatewayResponse {
   };
 }
 
+interface BatchOperation {
+  table: string;
+  action: 'select' | 'insert' | 'update' | 'delete';
+  data?: any;
+  conditions?: any;
+}
+
+interface BatchGatewayResponse {
+  success: boolean;
+  operation_id: string;
+  results?: any[];
+  error?: {
+    code: string;
+    message: string;
+    details?: any;
+  };
+}
+
 function normalizeError(error: unknown) {
   if (error instanceof Error) {
     return {
@@ -61,6 +79,11 @@ function sanitizeValue<T>(value: T): T {
   return value;
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('UNIQUE') || message.includes('constraint');
+}
+
 export class DbGatewayClient {
   private baseUrl: string;
   private signer: Ed25519Signer;
@@ -69,6 +92,27 @@ export class DbGatewayClient {
   constructor(baseUrl: string = process.env.DB_GATEWAY_URL || 'http://localhost:3003') {
     this.baseUrl = baseUrl;
     this.signer = new Ed25519Signer();
+  }
+
+  async healthCheck(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (!response.ok) {
+        return false;
+      }
+
+      const health = await response.json() as { success?: boolean };
+      return health.success === true;
+    } catch {
+      return false;
+    }
   }
 
   private async executeOperation(
@@ -135,7 +179,7 @@ export class DbGatewayClient {
           finalConditions = sanitizeValue(riskResult.db_operation.conditions);
         }
 
-        logger.info('风控评估完成', {
+        logger.debug('风控评估完成', {
           operationId,
           decision: riskResult.decision,
           reasons: riskResult.reasons,
@@ -239,6 +283,60 @@ export class DbGatewayClient {
     }
   }
 
+  private async executeBatchOperation(
+    operations: BatchOperation[],
+    operationType: 'read' | 'write' | 'sensitive' = 'write'
+  ): Promise<any[]> {
+    if (operations.length === 0) {
+      return [];
+    }
+
+    const operationId = uuidv4();
+    const timestamp = Date.now();
+    const sanitizedOperations = operations.map(operation => ({
+      table: operation.table,
+      action: operation.action,
+      data: operation.data === undefined ? undefined : sanitizeValue(operation.data),
+      conditions: operation.conditions === undefined ? undefined : sanitizeValue(operation.conditions)
+    }));
+
+    // 当前 db_gateway 的批量签名校验沿用通用签名序列化格式；
+    // 只批量提交非敏感链上事实，credit 仍走单笔风控闭环，避免跨模块签名语义漂移。
+    const signaturePayload: SignaturePayload = {
+      operation_id: operationId,
+      operation_type: operationType,
+      operations: sanitizedOperations,
+      timestamp
+    };
+
+    const signature = this.signer.sign(signaturePayload);
+    const response = await fetch(`${this.baseUrl}/api/database/batch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        operation_id: operationId,
+        operation_type: operationType,
+        operations: sanitizedOperations,
+        business_signature: signature,
+        timestamp
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({})) as BatchGatewayResponse;
+      throw new Error(`批量API调用失败: ${response.status} - ${errorData.error?.message || errorData.error?.details || '操作失败'}`);
+    }
+
+    const apiResult = await response.json() as BatchGatewayResponse;
+    if (!apiResult.success) {
+      throw new Error(`批量操作失败: ${apiResult.error?.message || apiResult.error?.details || '未知错误'}`);
+    }
+
+    return apiResult.results || [];
+  }
+
   /**
    * 插入Solana槽位记录
    */
@@ -265,7 +363,43 @@ export class DbGatewayClient {
       return true;
     } catch (error) {
       logger.error('插入Solana槽位记录失败', { slot: params.slot, error: normalizeError(error) });
-      return false;
+      throw error;
+    }
+  }
+
+  async insertSolanaSlots(slots: Array<{
+    slot: number;
+    block_hash?: string;
+    parent_slot?: number;
+    block_time?: number;
+    status?: string;
+  }>): Promise<number> {
+    const now = new Date().toISOString();
+    const operations = slots.map(params => ({
+      table: 'solana_slots',
+      action: 'insert' as const,
+      data: {
+        slot: params.slot,
+        block_hash: params.block_hash || null,
+        parent_slot: params.parent_slot || null,
+        block_time: params.block_time || null,
+        status: params.status || 'confirmed',
+        created_at: now,
+        updated_at: now
+      }
+    }));
+
+    try {
+      await this.executeBatchOperation(operations, 'write');
+      return operations.length;
+    } catch (error) {
+      logger.error('批量插入Solana槽位记录失败', {
+        count: operations.length,
+        firstSlot: slots[0]?.slot,
+        lastSlot: slots[slots.length - 1]?.slot,
+        error: normalizeError(error)
+      });
+      throw error;
     }
   }
 
@@ -305,6 +439,7 @@ export class DbGatewayClient {
     type?: string;
     status?: string;
     block_time?: number;
+    allowExisting?: boolean;
   }): Promise<boolean> {
     try {
       const data = {
@@ -323,8 +458,67 @@ export class DbGatewayClient {
       await this.executeOperation('solana_transactions', 'insert', 'write', data);
       return true;
     } catch (error) {
+      if (params.allowExisting && isUniqueConstraintError(error)) {
+        logger.debug('Solana交易记录已存在', { txHash: params.tx_hash });
+        return false;
+      }
       logger.error('插入Solana交易记录失败', { txHash: params.tx_hash, error: normalizeError(error) });
-      return false;
+      throw error;
+    }
+  }
+
+  async insertSolanaTransactions(paramsList: Array<{
+    slot: number;
+    tx_hash: string;
+    from_addr?: string;
+    to_addr: string;
+    token_mint?: string;
+    amount: string;
+    type?: string;
+    status?: string;
+    block_time?: number;
+  }>): Promise<number> {
+    const now = new Date().toISOString();
+    const operations = paramsList.map(params => ({
+      table: 'solana_transactions',
+      action: 'insert' as const,
+      data: {
+        slot: params.slot,
+        tx_hash: params.tx_hash,
+        from_addr: params.from_addr || null,
+        to_addr: params.to_addr,
+        token_mint: params.token_mint || null,
+        amount: params.amount,
+        type: params.type || 'deposit',
+        status: params.status || 'confirmed',
+        block_time: params.block_time || null,
+        created_at: now
+      }
+    }));
+
+    try {
+      await this.executeBatchOperation(operations, 'write');
+      return operations.length;
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        logger.debug('批量Solana交易记录包含已存在交易，逐条幂等写入', {
+          count: paramsList.length
+        });
+        let inserted = 0;
+        for (const params of paramsList) {
+          const ok = await this.insertSolanaTransaction({ ...params, allowExisting: true });
+          if (ok) {
+            inserted++;
+          }
+        }
+        return inserted;
+      }
+
+      logger.error('批量插入Solana交易记录失败', {
+        count: operations.length,
+        error: normalizeError(error)
+      });
+      throw error;
     }
   }
 
@@ -352,7 +546,7 @@ export class DbGatewayClient {
     try {
       let referenceId = params.reference_id;
       if (!referenceId && params.credit_type === 'deposit' && params.tx_hash) {
-        referenceId = `${params.tx_hash}_${params.event_index || 0}`;
+        referenceId = `${params.tx_hash}_${params.event_index ?? 0}`;
       }
 
       if (!referenceId) {
@@ -374,7 +568,7 @@ export class DbGatewayClient {
         status: params.status || 'confirmed',
         block_number: params.block_number || null,
         tx_hash: params.tx_hash || null,
-        event_index: params.event_index || null,
+        event_index: params.event_index ?? 0,
         metadata: params.metadata ? JSON.stringify(params.metadata) : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -382,13 +576,16 @@ export class DbGatewayClient {
 
       const result = await this.executeOperation('credits', 'insert', 'sensitive', data);
       return result.lastID || null;
-    } catch (error: any) {
-      if (error?.message?.includes('UNIQUE') || error?.message?.includes('constraint')) {
-        logger.debug('Credit记录已存在', { txHash: params.tx_hash });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        logger.debug('Credit记录已存在', {
+          txHash: params.tx_hash,
+          eventIndex: params.event_index
+        });
         return null;
       }
       logger.error('创建credit记录失败', { error: normalizeError(error) });
-      return null;
+      throw error;
     }
   }
 

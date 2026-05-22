@@ -1,7 +1,7 @@
-import dotenv from 'dotenv';
+// import dotenv from 'dotenv';
 
-// 加载环境变量
-dotenv.config();
+// // 加载环境变量
+// dotenv.config();
 
 export interface Config {
   // Solana节点配置
@@ -15,6 +15,10 @@ export interface Config {
   startSlot: number;
   confirmationThreshold: number;
   scanInterval: number;
+  scanBatchSize: number;
+  blockFetchConcurrency: number;
+  creditProcessConcurrency: number;
+  finalizedUpdateIntervalMs: number;
 
   // 服务配置
   logLevel: string;
@@ -32,6 +36,10 @@ const config: Config = {
   startSlot: parseInt(process.env.START_SLOT || '0'),
   confirmationThreshold: parseInt(process.env.CONFIRMATION_THRESHOLD || '32'),
   scanInterval: parseInt(process.env.SCAN_INTERVAL || '2'),
+  scanBatchSize: parseInt(process.env.SOLANA_SCAN_BATCH_SIZE || '100'),
+  blockFetchConcurrency: parseInt(process.env.SOLANA_SCAN_BLOCK_CONCURRENCY || '8'),
+  creditProcessConcurrency: parseInt(process.env.SOLANA_SCAN_CREDIT_CONCURRENCY || '4'),
+  finalizedUpdateIntervalMs: parseInt(process.env.SOLANA_FINALIZED_UPDATE_INTERVAL_MS || '5000'),
 
   // 服务配置
   logLevel: process.env.LOG_LEVEL || 'info'

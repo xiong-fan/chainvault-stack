@@ -9,6 +9,7 @@ export type SupportedChain = 'mainnet' | 'sepolia' | 'bsc' | 'bscTestnet' | 'loc
 export interface ChainConfig {
   chain: any;
   rpcUrl: string;
+  fallbackRpcUrls: string[];
   name: string;
   chainId: number;
   chainType: 'evm' | 'solana';  // 添加链类型标识
@@ -50,11 +51,20 @@ export class ChainConfigManager {
       localhost: process.env.LOCALHOST_RPC_URL || 'http://127.0.0.1:8545',
       solana: process.env.SOLANA_RPC_URL || 'http://127.0.0.1:8899'
     };
+    const fallbackRpcUrls = {
+      mainnet: this.parseRpcFallbacks(process.env.MAINNET_RPC_URL_BACKUP || process.env.ETH_RPC_URL_BACKUP),
+      sepolia: this.parseRpcFallbacks(process.env.SEPOLIA_RPC_URL_BACKUP || process.env.ETH_RPC_URL_BACKUP),
+      bsc: this.parseRpcFallbacks(process.env.BSC_RPC_URL_BACKUP),
+      bscTestnet: this.parseRpcFallbacks(process.env.BSC_TESTNET_RPC_URL_BACKUP),
+      localhost: this.parseRpcFallbacks(process.env.LOCALHOST_RPC_URL_BACKUP),
+      solana: this.parseRpcFallbacks(process.env.SOLANA_RPC_URL_BACKUP)
+    };
 
     // 以太坊主网
     this.chainConfigs.set('mainnet', {
       chain: mainnet,
       rpcUrl: defaultRpcUrls.mainnet,
+      fallbackRpcUrls: fallbackRpcUrls.mainnet,
       name: 'Ethereum Mainnet',
       chainId: 1,
       chainType: 'evm'
@@ -64,6 +74,7 @@ export class ChainConfigManager {
     this.chainConfigs.set('sepolia', {
       chain: sepolia,
       rpcUrl: defaultRpcUrls.sepolia,
+      fallbackRpcUrls: fallbackRpcUrls.sepolia,
       name: 'Ethereum Sepolia',
       chainId: 11155111,
       chainType: 'evm'
@@ -73,6 +84,7 @@ export class ChainConfigManager {
     this.chainConfigs.set('bsc', {
       chain: bsc,
       rpcUrl: defaultRpcUrls.bsc,
+      fallbackRpcUrls: fallbackRpcUrls.bsc,
       name: 'BNB Smart Chain',
       chainId: 56,
       chainType: 'evm'
@@ -82,6 +94,7 @@ export class ChainConfigManager {
     this.chainConfigs.set('bscTestnet', {
       chain: bscTestnet,
       rpcUrl: defaultRpcUrls.bscTestnet,
+      fallbackRpcUrls: fallbackRpcUrls.bscTestnet,
       name: 'BNB Smart Chain Testnet',
       chainId: 97,
       chainType: 'evm'
@@ -91,6 +104,7 @@ export class ChainConfigManager {
     this.chainConfigs.set('localhost', {
       chain: localhost,
       rpcUrl: defaultRpcUrls.localhost,
+      fallbackRpcUrls: fallbackRpcUrls.localhost,
       name: 'Localhost',
       chainId: 31337,
       chainType: 'evm'
@@ -100,10 +114,19 @@ export class ChainConfigManager {
     this.chainConfigs.set('solana', {
       chain: null,  // Solana 不使用 viem chain
       rpcUrl: defaultRpcUrls.solana,
+      fallbackRpcUrls: fallbackRpcUrls.solana,
       name: 'Solana Local',
       chainId: 900,
       chainType: 'solana'
     });
+  }
+
+  private parseRpcFallbacks(value?: string): string[] {
+    if (!value) return [];
+    return value
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
   }
 
   /**
@@ -162,6 +185,33 @@ export class ChainConfigManager {
     }
 
     return this.publicClients.get(chain);
+  }
+
+  /**
+   * 获取指定链可用 RPC URL 列表，主 RPC 在前，备用 RPC 去重后追加。
+   */
+  public getRpcUrls(chain: SupportedChain): string[] {
+    const config = this.chainConfigs.get(chain);
+    if (!config) {
+      throw new Error(`Unsupported chain: ${chain}`);
+    }
+
+    return Array.from(new Set([config.rpcUrl, ...config.fallbackRpcUrls].filter(Boolean)));
+  }
+
+  /**
+   * 创建临时 EVM public client。用于广播失败时切换备用 RPC，不污染默认缓存。
+   */
+  public createEvmPublicClient(chain: SupportedChain, rpcUrl: string): any {
+    const config = this.chainConfigs.get(chain);
+    if (!config || config.chainType !== 'evm') {
+      throw new Error(`Unsupported EVM chain: ${chain}`);
+    }
+
+    return createPublicClient({
+      chain: config.chain,
+      transport: http(rpcUrl)
+    });
   }
 
   /**

@@ -1,0 +1,36 @@
+{
+  "name": "fund-rebalance",
+  "version": "1.0.0",
+  "description": "EVM fund collection service",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "dev:watch": "nodemon --exec ts-node src/index.ts",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "tweetnacl": "^1.0.3",
+    "uuid": "^13.0.0",
+    "viem": "^2.37.8"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.1",
+    "nodemon": "^3.1.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "keywords": [
+    "wallet",
+    "fund",
+    "rebalance",
+    "evm"
+  ],
+  "author": "",
+  "license": "ISC"
+}

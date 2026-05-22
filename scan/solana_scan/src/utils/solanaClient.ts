@@ -87,7 +87,7 @@ export class SolanaClient {
         commitment: config?.commitment || 'confirmed',
         maxSupportedTransactionVersion: config?.maxSupportedTransactionVersion ?? 0,
         transactionDetails: config?.transactionDetails || 'full',
-        rewards: config?.rewards ?? true,
+        rewards: config?.rewards ?? false,
         encoding: config?.encoding || 'jsonParsed'
       };
 
@@ -106,8 +106,8 @@ export class SolanaClient {
 
       return block;
     } catch (error: any) {
-      // 如果是槽位被跳过的错误，返回 null 而不是抛出异常
-      if (error?.message?.includes('skipped') || error?.message?.includes('not available')) {
+      // 只有明确 skipped 的槽位才返回 null；历史不可用/节点未保留不能当作 skipped 入库。
+      if (error?.message?.includes('skipped')) {
         logger.debug('槽位被跳过', { slot });
         return null;
       }
@@ -122,7 +122,7 @@ export class SolanaClient {
             commitment: config?.commitment || 'confirmed',
             maxSupportedTransactionVersion: config?.maxSupportedTransactionVersion ?? 0,
             transactionDetails: config?.transactionDetails || 'full',
-            rewards: config?.rewards ?? true,
+            rewards: config?.rewards ?? false,
             encoding: config?.encoding || 'jsonParsed'
           };
           const block = await this.backupRpc.getBlock(BigInt(slot), blockConfig).send();

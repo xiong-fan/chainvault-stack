@@ -15,7 +15,7 @@ export class Database {
         logger.error('数据库连接失败', { path: dbPath, error: err.message });
         throw err;
       } else {
-        logger.info('数据库连接成功', { path: dbPath });
+        logger.debug('数据库连接成功', { path: dbPath });
       }
     });
   }
@@ -32,7 +32,7 @@ export class Database {
       // 只验证数据库连接是否正常
       await this.verifyConnection();
       this.isInitialized = true;
-      logger.info('数据库初始化完成');
+      logger.debug('数据库初始化完成');
     } catch (error) {
       logger.error('数据库初始化失败', { error });
       throw error;
@@ -108,7 +108,7 @@ export class Database {
           logger.error('关闭数据库连接失败', { error: err.message });
           reject(err);
         } else {
-          logger.info('数据库连接已关闭');
+          logger.debug('数据库连接已关闭');
           this.db = null;
           this.isInitialized = false;
           resolve();

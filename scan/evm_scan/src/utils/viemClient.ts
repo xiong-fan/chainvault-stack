@@ -24,7 +24,7 @@ export class ViemClient {
     }
     
     this.currentClient = this.client;
-    logger.info('Viem 客户端初始化完成', {
+    logger.debug('Viem 客户端初始化完成', {
       rpcUrl: config.ethRpcUrl,
       hasBackup: !!config.ethRpcUrlBackup
     });
@@ -94,6 +94,11 @@ export class ViemClient {
       logger.debug('获取交易详情', { txHash, found: !!tx });
       return tx;
     } catch (error) {
+      if (this.isNotFoundError(error)) {
+        logger.debug('交易详情暂未找到，继续等待', { txHash });
+        return null;
+      }
+
       logger.error('获取交易详情失败', { txHash, error });
       
       // 尝试使用备份客户端
@@ -122,6 +127,11 @@ export class ViemClient {
       });
       return receipt;
     } catch (error) {
+      if (this.isNotFoundError(error)) {
+        logger.debug('交易收据暂未找到，提现监控保持等待态', { txHash });
+        return null;
+      }
+
       logger.error('获取交易收据失败', { txHash, error });
       
       // 尝试使用备份客户端
@@ -131,6 +141,26 @@ export class ViemClient {
         return this.getTransactionReceipt(txHash);
       }
       
+      throw error;
+    }
+  }
+
+  async getPendingNonce(address: string): Promise<number> {
+    try {
+      const nonce = await this.currentClient.getTransactionCount({
+        address: address as `0x${string}`,
+        blockTag: 'pending'
+      });
+      return Number(nonce);
+    } catch (error) {
+      logger.error('获取 pending nonce 失败', { address, error });
+
+      if (this.backupClient && this.currentClient !== this.backupClient) {
+        logger.warn('尝试使用备份 RPC 客户端');
+        this.currentClient = this.backupClient;
+        return this.getPendingNonce(address);
+      }
+
       throw error;
     }
   }
@@ -280,7 +310,7 @@ export class ViemClient {
               if (txData.to && 
                   userAddresses.some(addr => addr.toLowerCase() === txData.to!.toLowerCase()) && 
                   txData.value > 0n) {
-                logger.info('发现ETH转账', {
+                logger.debug('发现ETH转账', {
                   blockNumber: txData.blockNumber?.toString(),
                   txHash: txData.hash,
                   from: txData.from,
@@ -324,7 +354,7 @@ export class ViemClient {
    */
   resetToMainClient(): void {
     this.currentClient = this.client;
-    logger.info('重置为主要 RPC 客户端');
+    logger.debug('重置为主要 RPC 客户端');
   }
 
   /**
@@ -432,7 +462,7 @@ export class ViemClient {
     const safeSupported = (await this.getSafeBlock()) !== null;
     const finalizedSupported = (await this.getFinalizedBlock()) !== null;
     
-    logger.info('网络终结性支持检测', {
+    logger.debug('网络终结性支持检测', {
       safe: safeSupported,
       finalized: finalizedSupported
     });
@@ -441,6 +471,18 @@ export class ViemClient {
       safe: safeSupported,
       finalized: finalizedSupported
     };
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    const text = error instanceof Error
+      ? `${error.name} ${error.message}`.toLowerCase()
+      : String(error ?? '').toLowerCase();
+
+    return text.includes('transactionreceiptnotfounderror') ||
+      text.includes('transactionnotfounderror') ||
+      text.includes('transaction receipt not found') ||
+      text.includes('transaction not found') ||
+      text.includes('not found');
   }
 }
 

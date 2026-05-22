@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Ed25519Signer, SignaturePayload } from '../utils/crypto';
 import { getRiskControlClient } from './riskControlClient';
+import logger from '../utils/logger';
 
 interface GatewayRequest {
   operation_id: string;
@@ -200,7 +201,7 @@ export class DbGatewayClient {
 
       return apiResult.data;
     } catch (error) {
-      console.error('数据库操作失败:', error);
+      logger.error('数据库操作失败', { table, action, operationType, error });
       throw error;
     }
   }
@@ -229,7 +230,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新credit状态失败 (txHash: ${txHash}):`, error);
+      logger.error('更新credit状态失败', { txHash, error });
       return false;
     }
   }
@@ -252,7 +253,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新交易状态失败 (txHash: ${txHash}):`, error);
+      logger.error('更新交易状态失败', { txHash, error });
       return false;
     }
   }
@@ -290,7 +291,7 @@ export class DbGatewayClient {
       await this.executeOperation('transactions', 'insert', 'write', data);
       return true;
     } catch (error) {
-      console.error(`插入交易记录失败 (txHash: ${params.tx_hash}):`, error);
+      logger.error('插入交易记录失败', { txHash: params.tx_hash, error });
       return false;
     }
   }
@@ -365,7 +366,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`插入区块记录失败 (hash: ${params.hash}):`, error);
+      logger.error('插入区块记录失败', { hash: params.hash, error });
       return false;
     }
   }
@@ -417,7 +418,7 @@ export class DbGatewayClient {
         status: params.status || 'confirmed',
         block_number: params.block_number || null,
         tx_hash: params.tx_hash || null,
-        event_index: params.event_index || null,
+        event_index: params.event_index ?? null,
         metadata: params.metadata ? JSON.stringify(params.metadata) : null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
@@ -426,7 +427,7 @@ export class DbGatewayClient {
       const result = await this.executeOperation('credits', 'insert', 'sensitive', data);
       return result.lastID || null;
     } catch (error) {
-      console.error('创建credit记录失败:', error);
+      logger.error('创建credit记录失败', { error });
       return null;
     }
   }
@@ -449,7 +450,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新交易确认数失败 (txHash: ${txHash}):`, error);
+      logger.error('更新交易确认数失败', { txHash, error });
       return false;
     }
   }
@@ -474,7 +475,7 @@ export class DbGatewayClient {
 
       return result.changes || 0;
     } catch (error) {
-      console.error(`删除Credit记录失败 (startBlock: ${startBlock}, endBlock: ${endBlock}):`, error);
+      logger.error('删除Credit记录失败', { startBlock, endBlock, error });
       return 0;
     }
   }
@@ -526,10 +527,10 @@ export class DbGatewayClient {
     } catch (error: any) {
       // 如果是唯一约束冲突（重复记录），返回null
       if (error?.message?.includes('UNIQUE') || error?.message?.includes('constraint')) {
-        console.log('充值Credit记录已存在', { txHash: params.txHash, userId: params.userId });
+        logger.debug('充值Credit记录已存在', { txHash: params.txHash, userId: params.userId });
         return null;
       }
-      console.error(`创建充值Credit记录失败 (txHash: ${params.txHash}):`, error);
+      logger.error('创建充值Credit记录失败', { txHash: params.txHash, error });
       return null;
     }
   }
@@ -543,17 +544,17 @@ export class DbGatewayClient {
     values: any[];
     description?: string;
   }[]): Promise<boolean> {
-    console.warn('批量事务执行暂不支持，将串行执行操作');
+    logger.debug('批量事务执行暂不支持，将串行执行操作');
 
     try {
       for (const op of operations) {
         // 这里需要将 SQL 转换为结构化操作
         // 由于无法直接转换所有 SQL，建议重构调用方使用结构化方法
-        console.log(`执行操作: ${op.description || op.sql}`);
+        logger.debug('执行批量操作', { operation: op.description || op.sql });
       }
       return true;
     } catch (error) {
-      console.error('批量操作执行失败:', error);
+      logger.error('批量操作执行失败', { error });
       return false;
     }
   }
@@ -603,7 +604,7 @@ export class DbGatewayClient {
       }
       return true;
     } catch (error) {
-      console.error('批量处理存款失败:', error);
+      logger.error('批量处理存款失败', { error });
       return false;
     }
   }
@@ -625,7 +626,7 @@ export class DbGatewayClient {
       }
       return true;
     } catch (error) {
-      console.error('批量插入区块失败:', error);
+      logger.error('批量插入区块失败', { error });
       return false;
     }
   }
@@ -690,7 +691,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error('批量处理区块和存款失败:', error);
+      logger.error('批量处理区块和存款失败', { error });
       return false;
     }
   }
@@ -709,7 +710,7 @@ export class DbGatewayClient {
       );
       return result && result.changes > 0;
     } catch (error) {
-      console.error(`删除交易记录失败 (txHash: ${txHash}):`, error);
+      logger.error('删除交易记录失败', { txHash, error });
       return false;
     }
   }
@@ -732,7 +733,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新区块状态失败 (blockHash: ${blockHash}):`, error);
+      logger.error('更新区块状态失败', { blockHash, error });
       return false;
     }
   }
@@ -772,7 +773,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新提现状态失败 (withdrawId: ${withdrawId}):`, error);
+      logger.error('更新提现状态失败', { withdrawId, error });
       return false;
     }
   }
@@ -811,7 +812,7 @@ export class DbGatewayClient {
 
       return true;
     } catch (error) {
-      console.error(`更新Credit状态失败 (referenceId: ${referenceId}):`, error);
+      logger.error('更新Credit状态失败', { referenceId, error });
       return false;
     }
   }

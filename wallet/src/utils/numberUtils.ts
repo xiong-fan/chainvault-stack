@@ -72,3 +72,32 @@ export function normalizeValue(value: number): string {
   const result = value.toFixed(0);
   return result;
 }
+
+/**
+ * 将最小单位金额格式化为人类可读数量，保留有效小数并去掉多余的 0。
+ * 例如 7000000000000000 / 18 -> 0.007。
+ */
+export function formatUnits(amount: string | bigint, decimals: number): string {
+  const value = typeof amount === 'bigint' ? amount : BigInt(normalizeBigIntString(amount));
+  const negative = value < 0n;
+  const absoluteValue = negative ? -value : value;
+
+  if (decimals <= 0) {
+    return `${negative ? '-' : ''}${absoluteValue.toString()}`;
+  }
+
+  const base = 10n ** BigInt(decimals);
+  const integerPart = absoluteValue / base;
+  const fractionalPart = absoluteValue % base;
+
+  if (fractionalPart === 0n) {
+    return `${negative ? '-' : ''}${integerPart.toString()}`;
+  }
+
+  const fraction = fractionalPart
+    .toString()
+    .padStart(decimals, '0')
+    .replace(/0+$/, '');
+
+  return `${negative ? '-' : ''}${integerPart.toString()}.${fraction}`;
+}

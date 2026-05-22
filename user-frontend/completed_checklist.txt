@@ -1,0 +1,84 @@
+CEX Wallet User Frontend - 已完成清单
+生成时间: 2026-05-05
+
+项目基础
+- user-frontend/package.json
+- user-frontend/tsconfig.json
+- user-frontend/next.config.ts
+- user-frontend/postcss.config.mjs
+- user-frontend/tailwind.config.ts
+- user-frontend/.eslintrc.json
+- user-frontend/next-env.d.ts
+- user-frontend/.env.example
+
+全局样式与根布局
+- user-frontend/app/layout.tsx
+- user-frontend/app/globals.css
+- user-frontend/app/page.tsx
+
+配置、工具与基础能力
+- user-frontend/lib/config/app-config.ts
+- user-frontend/lib/utils.ts
+- user-frontend/lib/chains/index.ts
+- user-frontend/lib/format/address.ts
+- user-frontend/lib/format/number.ts
+
+API 客户端与类型
+- user-frontend/lib/api/client.ts
+- user-frontend/lib/api/wallet-api.ts
+- user-frontend/types/api/wallet.ts
+- user-frontend/types/domain/withdraw.ts
+- user-frontend/lib/types.ts
+
+会话/路由守卫
+- user-frontend/lib/auth/user-session-context.tsx
+- user-frontend/lib/auth/session-guard.tsx
+- user-frontend/app/(dashboard)/layout.tsx
+
+Query 层
+- user-frontend/lib/hooks/use-wallet-keys.ts
+- user-frontend/lib/hooks/use-wallet.ts
+
+Web3/Query Provider
+- user-frontend/lib/providers/web3-provider.tsx
+- user-frontend/lib/providers/query-provider.tsx
+- user-frontend/lib/providers/app-providers.tsx
+- user-frontend/lib/providers/app.tsx
+
+基础 UI 组件
+- user-frontend/components/ui/surface.tsx
+- user-frontend/components/ui/text-field.tsx
+- user-frontend/components/ui/badge.tsx
+- user-frontend/components/ui/button.tsx
+- user-frontend/components/ui/loading.tsx
+
+Dashboard 组件
+- user-frontend/components/dashboard/layout.tsx
+- user-frontend/components/dashboard/user-id-binder.tsx
+- user-frontend/components/dashboard/error-summary.tsx
+- user-frontend/components/dashboard/cards.tsx
+- user-frontend/components/dashboard/portfolio-chart.tsx
+- user-frontend/components/dashboard/recent-transfers.tsx
+
+Deposit 组件
+- user-frontend/components/deposit/chain-addresses.tsx
+- user-frontend/components/deposit/recent-deposits.tsx
+
+Withdraw 组件
+- user-frontend/components/withdraw/withdraw-form.tsx
+- user-frontend/components/withdraw/status-badge.tsx
+- user-frontend/components/withdraw/withdraw-records.tsx
+
+交易记录组件
+- user-frontend/components/records/list.tsx
+
+页面实现
+- user-frontend/app/(dashboard)/dashboard/page.tsx
+- user-frontend/app/(dashboard)/deposit/page.tsx
+- user-frontend/app/(dashboard)/withdraw/page.tsx
+- user-frontend/app/(dashboard)/records/page.tsx
+- user-frontend/app/(dashboard)/addresses/page.tsx
+- user-frontend/app/(dashboard)/profile/page.tsx
+
+说明文档
+- user-frontend/lib/chains/README.md

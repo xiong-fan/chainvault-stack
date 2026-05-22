@@ -5,6 +5,52 @@ import { getDbGatewayClient } from './dbGatewayClient';
 import logger from '../utils/logger';
 import config from '../config';
 
+type SlotStatus = 'confirmed' | 'finalized' | 'skipped';
+
+class SlotRangeIncompleteError extends Error {
+  constructor(public readonly retryFromSlot: number) {
+    super(`槽位窗口未完整处理，将从 ${retryFromSlot} 重试`);
+  }
+}
+
+interface SlotScanResult {
+  slot: number;
+  ok: boolean;
+  slotRecord?: {
+    slot: number;
+    block_hash?: string;
+    parent_slot?: number;
+    block_time?: number;
+    status: SlotStatus;
+  };
+  deposits: Awaited<ReturnType<typeof transactionParser.parseBlock>>;
+  transactionRecords: ReturnType<typeof transactionParser.buildTransactionRecord>[];
+  error?: unknown;
+  timings: {
+    getBlockMs: number;
+    parseMs: number;
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
+}
+
 export interface ScanProgress {
   currentSlot: number;
   latestSlot: number;
@@ -19,6 +65,7 @@ export class BlockScanner {
   private dbGatewayClient = getDbGatewayClient();
   private cachedFinalizedSlot: number = 0;
   private lastFinalizedSlotUpdate: number = 0;
+  private lastProgressLogAt: number = 0;
 
   /**
    * 启动扫描服务
@@ -34,12 +81,14 @@ export class BlockScanner {
     logger.info('启动Solana区块扫描器', {
       startSlot: config.startSlot,
       confirmationThreshold: config.confirmationThreshold,
+      scanBatchSize: config.scanBatchSize,
+      blockFetchConcurrency: config.blockFetchConcurrency,
+      creditProcessConcurrency: config.creditProcessConcurrency,
     });
 
     try {
       // 执行初始同步扫描
       await this.performInitialSync();
-
       // 启动定时扫描
       this.startIntervalScanning();
     } catch (error) {
@@ -65,29 +114,23 @@ export class BlockScanner {
     logger.info('Solana区块扫描器已停止');
   }
 
-  /**
-   * 执行初始同步扫描（逐个槽位扫描）
-   */
   private async performInitialSync(): Promise<void> {
-    logger.info('开始初始同步扫描（逐个槽位模式）...');
+    logger.info('开始初始同步扫描（批量窗口模式）...');
 
-    // 获取当前最新槽位
     let latestSlot = await solanaClient.getLatestSlot();
-
-    // 获取最后扫描的槽位
     const lastScannedSlot = await this.getLastScannedSlot();
     let currentSlot = lastScannedSlot + 1;
 
     logger.info('同步扫描状态', {
       startFromSlot: currentSlot,
-      latestSlot: latestSlot,
+      latestSlot,
       slotsToSync: latestSlot - currentSlot + 1
     });
 
-    // 逐个槽位扫描直到追上最新槽位
     while (currentSlot <= latestSlot && this.isScanning) {
-      // 每扫描一定数量的槽位打印进度
-      if (currentSlot % 10 === 0 || currentSlot === lastScannedSlot + 1) {
+      const batchEndSlot = Math.min(currentSlot + config.scanBatchSize - 1, latestSlot);
+      if (currentSlot === lastScannedSlot + 1 || Date.now() - this.lastProgressLogAt > 30000) {
+        this.lastProgressLogAt = Date.now();
         logger.info('扫描进度', {
           currentSlot,
           latestSlot,
@@ -96,17 +139,13 @@ export class BlockScanner {
       }
 
       try {
-        // 扫描单个槽位
-        await this.scanSingleSlot(currentSlot);
+        await this.scanSlotRange(currentSlot, batchEndSlot);
+        currentSlot = batchEndSlot + 1;
 
-        // 移动到下一个槽位
-        currentSlot++;
-
-        // 每扫描 100 个槽位检查是否有新的槽位产生
         if (currentSlot % 100 === 0) {
           const newLatestSlot = await solanaClient.getLatestSlot();
           if (newLatestSlot > latestSlot) {
-            logger.info('检测到新槽位', {
+            logger.debug('检测到新槽位', {
               oldLatest: latestSlot,
               newLatest: newLatestSlot,
               newSlots: newLatestSlot - latestSlot
@@ -115,18 +154,24 @@ export class BlockScanner {
           }
         }
       } catch (error) {
-        logger.error('扫描槽位失败', {
-          slot: currentSlot,
+        if (error instanceof SlotRangeIncompleteError) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          currentSlot = error.retryFromSlot;
+          continue;
+        }
+
+        logger.error('扫描槽位窗口失败', {
+          startSlot: currentSlot,
+          endSlot: batchEndSlot,
           error
         });
-        // 继续扫描下一个槽位，不要因为单个槽位失败而停止整个扫描
-        currentSlot++;
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
 
     logger.info('初始同步扫描完成', {
       lastScannedSlot: currentSlot - 1,
-      latestSlot: latestSlot
+      latestSlot
     });
   }
 
@@ -137,36 +182,20 @@ export class BlockScanner {
   private async getCachedFinalizedSlot(): Promise<number> {
     const now = Date.now();
     // 每1秒更新一次 finalized slot
-    if (now - this.lastFinalizedSlotUpdate > 1000) {
+    if (now - this.lastFinalizedSlotUpdate > config.finalizedUpdateIntervalMs) {
       try {
         const oldFinalizedSlot = this.cachedFinalizedSlot;
         const newFinalizedSlot = await solanaClient.getFinalizedSlot();
 
         // 检测到新的 finalized slot
         if (newFinalizedSlot > oldFinalizedSlot && oldFinalizedSlot > 0) {
-          logger.info('检测到新的 finalized slot，批量更新历史记录', {
+          logger.debug('检测到新的 finalized slot，批量更新历史记录', {
             oldFinalizedSlot,
             newFinalizedSlot,
             slotsToUpdate: newFinalizedSlot - oldFinalizedSlot
           });
 
-          // 批量更新 solana_slots
-          const slotsUpdated = await this.dbGatewayClient.updateSolanaSlotStatusToFinalized(newFinalizedSlot);
-
-          // 批量更新 solana_transactions
-          const txsUpdated = await this.dbGatewayClient.updateSolanaTransactionStatusToFinalized(newFinalizedSlot);
-
-          // 批量更新 credits
-          const creditsUpdated = await this.dbGatewayClient.updateCreditStatusToFinalized(newFinalizedSlot);
-
-          if (slotsUpdated > 0 || txsUpdated > 0 || creditsUpdated > 0) {
-            logger.info('批量更新 finalized 状态完成', {
-              newFinalizedSlot,
-              slotsUpdated,
-              txsUpdated,
-              creditsUpdated
-            });
-          }
+          await this.finalizeScannedRecords(newFinalizedSlot);
         }
 
         this.cachedFinalizedSlot = newFinalizedSlot;
@@ -180,19 +209,36 @@ export class BlockScanner {
   }
 
   /**
+   * 把已经低于 finalized slot 的扫描结果推进到最终入账。
+   * Solana 新充值先写 confirmed，给前端“充值中”一个可见阶段，再由这里统一收口。
+   */
+  private async finalizeScannedRecords(finalizedSlot: number): Promise<void> {
+    const slotsUpdated = await this.dbGatewayClient.updateSolanaSlotStatusToFinalized(finalizedSlot);
+    const txsUpdated = await this.dbGatewayClient.updateSolanaTransactionStatusToFinalized(finalizedSlot);
+    const creditsUpdated = await this.dbGatewayClient.updateCreditStatusToFinalized(finalizedSlot);
+
+    if (creditsUpdated > 0) {
+      logger.info('批量更新 finalized 状态完成', {
+        finalizedSlot,
+        slotsUpdated,
+        txsUpdated,
+        creditsUpdated
+      });
+    }
+  }
+
+  /**
    * 扫描单个槽位
    */
   private async scanSingleSlot(slot: number): Promise<void> {
     try {
       logger.debug('扫描槽位', { slot });
-
       // 检查槽位是否已处理（从本地数据库读取）
       const existingSlot = await solanaSlotDAO.getSlot(slot);
       if (existingSlot && existingSlot.status === 'finalized') {
         logger.debug('槽位已最终确认，跳过', { slot });
         return;
       }
-
       // 如果槽位已经被处理为 confirmed 或 skipped，也跳过
       if (existingSlot && (existingSlot.status === 'confirmed' || existingSlot.status === 'skipped')) {
         logger.debug('槽位已处理，跳过', { slot, status: existingSlot.status });
@@ -223,24 +269,231 @@ export class BlockScanner {
     }
   }
 
+  private async scanSlotRange(startSlot: number, endSlot: number): Promise<void> {
+    const rangeStartedAt = Date.now();
+    const timings = {
+      getBlocksMs: 0,
+      slotCheckMs: 0,
+      blockWorkMs: 0,
+      txBatchMs: 0,
+      slotBatchMs: 0
+    };
+
+    const slotNumbers = Array.from(
+      { length: endSlot - startSlot + 1 },
+      (_, index) => startSlot + index
+    );
+
+    const slotCheckStartedAt = Date.now();
+    const existingSlots = await solanaSlotDAO.getSlotsInRange(startSlot, endSlot);
+    const completedSlots = new Set(
+      existingSlots
+        .filter(slot => slot.status === 'finalized' || slot.status === 'confirmed' || slot.status === 'skipped')
+        .map(slot => slot.slot)
+    );
+    const slotsToScan = slotNumbers.filter(slot => !completedSlots.has(slot));
+    timings.slotCheckMs = Date.now() - slotCheckStartedAt;
+
+    if (slotsToScan.length === 0) {
+      logger.debug('槽位窗口已全部处理，跳过', { startSlot, endSlot });
+      return;
+    }
+
+    const getBlocksStartedAt = Date.now();
+    const blockSlots = await solanaClient.getBlocks(startSlot, endSlot);
+    const blockSlotSet = new Set(blockSlots);
+    timings.getBlocksMs = Date.now() - getBlocksStartedAt;
+
+    if (blockSlots.length === 0 && slotsToScan.length > 0) {
+      throw new Error(
+        `槽位窗口 ${startSlot}-${endSlot} 未从RPC返回任何可用区块，已停止批量标记 skipped，避免把历史不可用误判为空槽`
+      );
+    }
+
+    const missingBlockSlots = slotsToScan.filter(slot => !blockSlotSet.has(slot));
+    const slotsWithBlocks = slotsToScan.filter(slot => blockSlotSet.has(slot));
+
+    const blockWorkStartedAt = Date.now();
+    const results = await mapWithConcurrency(
+      [...slotsWithBlocks, ...missingBlockSlots],
+      config.blockFetchConcurrency,
+      slot => this.scanBlockSlotForBatch(slot)
+    );
+    timings.blockWorkMs = Date.now() - blockWorkStartedAt;
+
+    const fetchFailedResults = results.filter(result => !result.ok);
+    const parsedResults = results.filter(result => result.ok);
+    const transactionRecords = parsedResults.flatMap(result => result.transactionRecords);
+
+    if (transactionRecords.length > 0) {
+      const txBatchStartedAt = Date.now();
+      await this.dbGatewayClient.insertSolanaTransactions(transactionRecords);
+      timings.txBatchMs = Date.now() - txBatchStartedAt;
+    }
+
+    const creditStartedAt = Date.now();
+    const creditCheckedResults = await mapWithConcurrency(
+      parsedResults,
+      config.blockFetchConcurrency,
+      result => this.processCreditsForSlotResult(result)
+    );
+    const creditMs = Date.now() - creditStartedAt;
+
+    const successfulResults = creditCheckedResults.filter(result => result.ok);
+    const failedResults = [
+      ...fetchFailedResults,
+      ...creditCheckedResults.filter(result => !result.ok)
+    ];
+    const firstFailedSlot = failedResults.length > 0
+      ? Math.min(...failedResults.map(result => result.slot))
+      : null;
+    const slotRecords = successfulResults
+      .map(result => result.slotRecord)
+      .filter((record): record is NonNullable<SlotScanResult['slotRecord']> => Boolean(record))
+      .filter(record => firstFailedSlot === null || record.slot < firstFailedSlot);
+
+    if (slotRecords.length > 0) {
+      const slotBatchStartedAt = Date.now();
+      await this.dbGatewayClient.insertSolanaSlots(slotRecords);
+      timings.slotBatchMs = Date.now() - slotBatchStartedAt;
+    }
+
+    const totalDeposits = successfulResults.reduce((sum, result) => sum + result.deposits.length, 0);
+    const totalGetBlockMs = successfulResults.reduce((sum, result) => sum + result.timings.getBlockMs, 0);
+    const totalParseMs = successfulResults.reduce((sum, result) => sum + result.timings.parseMs, 0);
+
+    const windowLogPayload = {
+      startSlot,
+      endSlot,
+      totalSlots: slotNumbers.length,
+      skippedExisting: completedSlots.size,
+      scannedSlots: slotsToScan.length,
+      slotsWithBlocks: slotsWithBlocks.length,
+      skippedSlots: successfulResults.filter(result => result.slotRecord?.status === 'skipped').length,
+      failedSlots: failedResults.length,
+      deposits: totalDeposits,
+      elapsedMs: Date.now() - rangeStartedAt,
+      timings: {
+        ...timings,
+        getBlockMs: totalGetBlockMs,
+        parseMs: totalParseMs,
+        creditMs
+      }
+    };
+
+    if (totalDeposits > 0 || failedResults.length > 0) {
+      logger.info('槽位窗口扫描完成', windowLogPayload);
+    } else {
+      logger.debug('槽位窗口扫描完成', windowLogPayload);
+    }
+
+    if (failedResults.length > 0) {
+      logger.warn('部分槽位处理失败，未写入完成状态，后续扫描会重试', {
+        failedSlots: failedResults.map(result => result.slot).slice(0, 20),
+        failedCount: failedResults.length,
+        retryFromSlot: firstFailedSlot
+      });
+      throw new SlotRangeIncompleteError(firstFailedSlot!);
+    }
+  }
+
+  private async scanBlockSlotForBatch(slot: number): Promise<SlotScanResult> {
+    const timings = {
+      getBlockMs: 0,
+      parseMs: 0
+    };
+
+    try {
+      const blockStartedAt = Date.now();
+      const block = await solanaClient.getBlock(slot);
+      timings.getBlockMs = Date.now() - blockStartedAt;
+
+      if (!block) {
+        return {
+          slot,
+          ok: true,
+          slotRecord: {
+            slot,
+            status: 'skipped'
+          },
+          deposits: [],
+          transactionRecords: [],
+          timings
+        };
+      }
+
+      const finalizedSlot = await this.getCachedFinalizedSlot();
+      const slotStatus: 'confirmed' | 'finalized' = slot <= finalizedSlot ? 'finalized' : 'confirmed';
+
+      const parseStartedAt = Date.now();
+      // 充值先按 confirmed 落库，避免已 finalized 的批量扫描直接跳过前端“充值中”阶段。
+      const deposits = await transactionParser.parseBlock(block, slot, 'confirmed');
+      timings.parseMs = Date.now() - parseStartedAt;
+
+      return {
+        slot,
+        ok: true,
+        slotRecord: {
+          slot,
+          block_hash: block.blockhash || undefined,
+          parent_slot: block.parentSlot || undefined,
+          block_time: block.blockTime || undefined,
+          status: slotStatus
+        },
+        deposits,
+        transactionRecords: deposits.map(deposit => transactionParser.buildTransactionRecord(deposit)),
+        timings
+      };
+    } catch (error) {
+      logger.error('批量扫描槽位失败', { slot, error });
+      return {
+        slot,
+        ok: false,
+        deposits: [],
+        transactionRecords: [],
+        error,
+        timings
+      };
+    }
+  }
+
+  private async processCreditsForSlotResult(result: SlotScanResult): Promise<SlotScanResult> {
+    if (result.deposits.length === 0) {
+      return result;
+    }
+
+    try {
+      const creditResults = await mapWithConcurrency(
+        result.deposits,
+        config.creditProcessConcurrency,
+        deposit => transactionParser.createDepositCredit(deposit)
+      );
+      const failedCredits = creditResults.filter(success => !success).length;
+      if (failedCredits > 0) {
+        throw new Error(`槽位 ${result.slot} 有 ${failedCredits}/${result.deposits.length} 笔存款入账失败`);
+      }
+      return result;
+    } catch (error) {
+      logger.error('槽位存款入账失败，暂不标记槽位完成', {
+        slot: result.slot,
+        deposits: result.deposits.length,
+        error
+      });
+      return {
+        ...result,
+        ok: false,
+        error
+      };
+    }
+  }
+
   /**
    * 处理区块
    */
   private async processBlock(slot: number, block: any, status: string = 'confirmed'): Promise<void> {
     try {
-      // 解析区块中的交易（传入状态）
-      const deposits = await transactionParser.parseBlock(block, slot, status as 'confirmed' | 'finalized');
-
-      // 插入槽位记录（使用真实的状态）
-      await this.dbGatewayClient.insertSolanaSlot({
-        slot,
-        block_hash: block.blockhash || undefined,
-        parent_slot: block.parentSlot || undefined,
-        block_time: block.blockTime || undefined,
-        status
-      });
-
-      // 处理检测到的存款
+      // 充值流水先进入 confirmed 阶段，finalized 由统一批量推进处理。
+      const deposits = await transactionParser.parseBlock(block, slot, 'confirmed');
       let successCount = 0;
       let failureCount = 0;
 
@@ -253,10 +506,27 @@ export class BlockScanner {
           logger.error('存款处理失败', {
             slot,
             txHash: deposit.txHash,
+            eventIndex: deposit.eventIndex,
             toAddr: deposit.toAddr,
             type: deposit.type
           });
         }
+      }
+
+      if (failureCount > 0) {
+        throw new Error(`槽位 ${slot} 有 ${failureCount}/${deposits.length} 笔存款处理失败`);
+      }
+
+      await this.dbGatewayClient.insertSolanaSlot({
+        slot,
+        block_hash: block.blockhash || undefined,
+        parent_slot: block.parentSlot || undefined,
+        block_time: block.blockTime || undefined,
+        status
+      });
+
+      if (status === 'finalized') {
+        await this.finalizeScannedRecords(slot);
       }
 
       if (deposits.length > 0) {
@@ -381,7 +651,7 @@ export class BlockScanner {
           // 如果之前有回滚，继续检查直到找到稳定的槽位
           // 找到第一个稳定的槽位后，可以停止检查
           if (reorgCount > 0) {
-            logger.info('找到稳定槽位，停止继续检查', {
+            logger.debug('找到稳定槽位，停止继续检查', {
               stableSlot: dbSlot.slot,
               reorgCount,
               checkedCount,
@@ -452,26 +722,31 @@ export class BlockScanner {
       if (latestSlot > lastScannedSlot) {
         const newSlotsCount = latestSlot - lastScannedSlot;
 
-        logger.info('定时扫描新槽位', {
+        logger.debug('定时扫描新槽位', {
           lastScannedSlot,
           latestSlot,
           newSlots: newSlotsCount
         });
 
-        // 逐个扫描新槽位
         let currentSlot = lastScannedSlot + 1;
         while (currentSlot <= latestSlot && this.isScanning) {
+          const batchEndSlot = Math.min(currentSlot + config.scanBatchSize - 1, latestSlot);
           try {
-            await this.scanSingleSlot(currentSlot);
-            currentSlot++;
+            await this.scanSlotRange(currentSlot, batchEndSlot);
+            currentSlot = batchEndSlot + 1;
           } catch (error) {
-            logger.error('扫描新槽位失败', { slot: currentSlot, error });
-            // 继续扫描下一个槽位
-            currentSlot++;
+            if (error instanceof SlotRangeIncompleteError) {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              currentSlot = error.retryFromSlot;
+              continue;
+            }
+
+            logger.error('扫描新槽位窗口失败', { startSlot: currentSlot, endSlot: batchEndSlot, error });
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
         }
 
-        logger.info('定时扫描完成', {
+        logger.debug('定时扫描完成', {
           scannedSlots: newSlotsCount,
           lastSlot: currentSlot - 1
         });
@@ -495,12 +770,12 @@ export class BlockScanner {
    */
   private async getLastScannedSlot(): Promise<number> {
     try {
-      const lastSlot = await solanaSlotDAO.getLastScannedSlot();
+      const lastSlot = await solanaSlotDAO.getLastScannedSlot(config.startSlot);
 
-      if (lastSlot !== null) {
+
+      if (lastSlot !== null && lastSlot >= config.startSlot) {
         return lastSlot;
       }
-
       // 如果没有扫描过任何槽位，返回配置的起始槽位减一
       return config.startSlot - 1;
     } catch (error) {

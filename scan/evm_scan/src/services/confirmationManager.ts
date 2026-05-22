@@ -36,7 +36,7 @@ export class ConfirmationManager {
     try {
       this.networkSupportsFinality = await viemClient.supportsFinality();
       
-      logger.info('确认管理器初始化完成', {
+      logger.debug('确认管理器初始化完成', {
         useNetworkFinality: config.useNetworkFinality,
         networkSupport: this.networkSupportsFinality,
         confirmationBlocks: config.confirmationBlocks,
@@ -215,7 +215,7 @@ export class ConfirmationManager {
   private async safeTransaction(tx: any, method: 'network_finality' | 'confirmation_count'): Promise<void> {
     await this.dbGatewayClient.updateTransactionStatus(tx.tx_hash, 'safe');
     
-    logger.info('交易状态更新为 safe', { 
+    logger.debug('交易状态更新为 safe', { 
       txHash: tx.tx_hash, 
       blockNo: tx.block_no,
       method,

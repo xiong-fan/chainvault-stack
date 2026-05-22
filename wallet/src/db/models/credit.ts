@@ -75,6 +75,8 @@ export interface CreateCreditRequest {
 // 余额查询结果接口
 export interface UserBalance {
   user_id: number;
+  chain_id?: number | null;
+  chain_type?: string | null;
   address: string;
   token_id: number;
   token_symbol: string;
@@ -85,6 +87,15 @@ export interface UserBalance {
   available_balance_formatted: string; // 格式化的可用余额
   frozen_balance_formatted: string; // 格式化的冻结余额
   total_balance_formatted: string; // 格式化的总余额
+}
+
+export interface UserBalanceStats {
+  user_id: number;
+  chain_count: number;
+  token_count: number;
+  address_count: number;
+  positive_balance_count: number;
+  last_balance_update: string | null;
 }
 
 // Credit查询选项
@@ -102,6 +113,13 @@ export interface CreditQueryOptions {
   order_by?: 'created_at' | 'amount' | 'id';
   order_direction?: 'ASC' | 'DESC';
 }
+
+const USER_BALANCE_CONDITION = `(
+            (c.credit_type = 'deposit' AND c.status = 'finalized') OR
+            (c.credit_type = 'withdraw' AND c.status IN ('confirmed', 'finalized')) OR
+            (c.credit_type = 'network_fee' AND c.status IN ('confirmed', 'finalized'))
+          )`;
+const WALLET_INVENTORY_BALANCE_CONDITION = `c.credit_type IN ('deposit', 'withdraw', 'collect', 'rebalance', 'network_fee') AND c.status = 'finalized'`;
 
 // Credit数据模型类
 export class CreditModel {
@@ -190,22 +208,27 @@ export class CreditModel {
     let sql = `
       SELECT 
         c.user_id,
-        c.address,
+        c.chain_id,
+        c.chain_type,
+        CASE
+          WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+          ELSE c.address
+        END as address,
         c.token_id,
         c.token_symbol,
         t.decimals,
-        SUM(CASE 
-          WHEN c.credit_type NOT IN ('freeze') AND c.status = 'finalized' 
+        SUM(CASE
+          WHEN ${USER_BALANCE_CONDITION}
           THEN CAST(c.amount AS REAL) 
           ELSE 0 
         END) as available_balance,
         SUM(CASE 
-          WHEN c.credit_type = 'freeze' AND c.status = 'finalized' 
-          THEN CAST(c.amount AS REAL) 
+          WHEN c.credit_type = 'deposit' AND c.status = 'frozen' 
+          THEN ABS(CAST(c.amount AS REAL)) 
           ELSE 0 
         END) as frozen_balance,
-        SUM(CASE 
-          WHEN c.status = 'finalized' 
+        SUM(CASE
+          WHEN ${USER_BALANCE_CONDITION}
           THEN CAST(c.amount AS REAL) 
           ELSE 0 
         END) as total_balance
@@ -222,13 +245,25 @@ export class CreditModel {
     }
 
     sql += `
-      GROUP BY c.user_id, c.address, c.token_id, c.token_symbol, t.decimals
+      GROUP BY
+        c.user_id,
+        c.chain_id,
+        c.chain_type,
+        CASE
+          WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+          ELSE c.address
+        END,
+        c.token_id,
+        c.token_symbol,
+        t.decimals
       HAVING total_balance != 0
       ORDER BY c.token_symbol
     `;
 
     const rows = await this.db.query<{
       user_id: number;
+      chain_id: number | null;
+      chain_type: string | null;
       address: string;
       token_id: number;
       token_symbol: string;
@@ -242,6 +277,8 @@ export class CreditModel {
       const divisor = Math.pow(10, row.decimals);
       return {
         user_id: row.user_id,
+        chain_id: row.chain_id,
+        chain_type: row.chain_type,
         address: row.address,
         token_id: row.token_id,
         token_symbol: row.token_symbol,
@@ -264,22 +301,27 @@ export class CreditModel {
     let sql = `
       SELECT 
         c.user_id,
-        c.address,
+        c.chain_id,
+        c.chain_type,
+        CASE
+          WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+          ELSE c.address
+        END as address,
         c.token_id,
         c.token_symbol,
         t.decimals,
-        SUM(CASE 
-          WHEN c.credit_type NOT IN ('freeze') AND c.status = 'finalized' 
+        SUM(CASE
+          WHEN ${WALLET_INVENTORY_BALANCE_CONDITION}
           THEN CAST(c.amount AS REAL) 
           ELSE 0 
         END) as available_balance,
         SUM(CASE 
-          WHEN c.credit_type = 'freeze' AND c.status = 'finalized' 
-          THEN CAST(c.amount AS REAL) 
+          WHEN c.credit_type = 'deposit' AND c.status = 'frozen' 
+          THEN ABS(CAST(c.amount AS REAL)) 
           ELSE 0 
         END) as frozen_balance,
-        SUM(CASE 
-          WHEN c.status = 'finalized' 
+        SUM(CASE
+          WHEN ${WALLET_INVENTORY_BALANCE_CONDITION}
           THEN CAST(c.amount AS REAL) 
           ELSE 0 
         END) as total_balance
@@ -296,13 +338,25 @@ export class CreditModel {
     }
 
     sql += `
-      GROUP BY c.user_id, c.address, c.token_id, c.token_symbol, t.decimals
+      GROUP BY
+        c.user_id,
+        c.chain_id,
+        c.chain_type,
+        CASE
+          WHEN c.chain_type = 'evm' THEN LOWER(c.address)
+          ELSE c.address
+        END,
+        c.token_id,
+        c.token_symbol,
+        t.decimals
       HAVING total_balance != 0
       ORDER BY c.token_symbol
     `;
 
     const rows = await this.db.query<{
       user_id: number;
+      chain_id: number | null;
+      chain_type: string | null;
       address: string;
       token_id: number;
       token_symbol: string;
@@ -318,6 +372,8 @@ export class CreditModel {
       
       return {
         user_id: row.user_id,
+        chain_id: row.chain_id,
+        chain_type: row.chain_type,
         address: row.address,
         token_id: row.token_id,
         token_symbol: row.token_symbol,
@@ -334,6 +390,8 @@ export class CreditModel {
 
   // 获取用户各代币总余额（跨地址聚合）
   async getUserTotalBalancesByToken(userId: number): Promise<{
+    chain_id: number | null;
+    chain_type: string | null;
     token_symbol: string;
     total_balance: string;
     available_balance: string;
@@ -343,6 +401,8 @@ export class CreditModel {
     // 使用视图优化性能
     const sql = `
       SELECT
+        chain_id,
+        chain_type,
         token_symbol,
         total_available_formatted as available_balance,
         total_frozen_formatted as frozen_balance,
@@ -354,6 +414,8 @@ export class CreditModel {
     `;
 
     const rows = await this.db.query<{
+      chain_id: number | null;
+      chain_type: string | null;
       token_symbol: string;
       available_balance: string;
       frozen_balance: string;
@@ -367,6 +429,8 @@ export class CreditModel {
   // 获取用户聚合余额（使用视图优化，跨地址聚合）
   async getUserAggregatedBalances(userId: number, tokenId?: number): Promise<{
     token_id: number;
+    chain_id: number | null;
+    chain_type: string | null;
     token_symbol: string;
     available_balance: string;
     frozen_balance: string;
@@ -379,6 +443,8 @@ export class CreditModel {
     let sql = `
       SELECT
         token_id,
+        chain_id,
+        chain_type,
         token_symbol,
         decimals,
         total_available_balance as available_balance,
@@ -404,6 +470,8 @@ export class CreditModel {
 
     return rows.map((row: any) => ({
       token_id: row.token_id,
+      chain_id: row.chain_id,
+      chain_type: row.chain_type,
       token_symbol: row.token_symbol,
       available_balance: row.available_balance.toString(),
       frozen_balance: row.frozen_balance.toString(),
@@ -413,6 +481,43 @@ export class CreditModel {
       total_balance_formatted: row.total_balance_formatted,
       decimals: row.decimals
     }));
+  }
+
+  // 获取用户余额统计概览
+  async getUserBalanceStats(userId: number): Promise<UserBalanceStats> {
+    const sql = `
+      SELECT
+        user_id,
+        chain_count,
+        token_count,
+        address_count,
+        positive_balance_count,
+        last_balance_update
+      FROM v_user_balance_stats
+      WHERE user_id = ?
+    `;
+
+    const row = await this.db.queryOne<UserBalanceStats>(sql, [userId]);
+
+    if (!row) {
+      return {
+        user_id: userId,
+        chain_count: 0,
+        token_count: 0,
+        address_count: 0,
+        positive_balance_count: 0,
+        last_balance_update: null
+      };
+    }
+
+    return {
+      user_id: row.user_id,
+      chain_count: Number(row.chain_count || 0),
+      token_count: Number(row.token_count || 0),
+      address_count: Number(row.address_count || 0),
+      positive_balance_count: Number(row.positive_balance_count || 0),
+      last_balance_update: row.last_balance_update || null
+    };
   }
 
   // 获取Credit统计信息

@@ -23,6 +23,9 @@ export class SignatureMiddleware {
 
   validateRequest = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
+      logger.info('yyyyyy', {
+        body: req.body
+      })
       const gatewayRequest = req.body as GatewayRequest;
 
       // 验证必要字段

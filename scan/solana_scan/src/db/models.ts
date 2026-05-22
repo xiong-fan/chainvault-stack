@@ -83,15 +83,44 @@ export class SolanaSlotDAO {
     }
   }
 
+  async getSlotsInRange(startSlot: number, endSlot: number): Promise<SolanaSlot[]> {
+    try {
+      const rows = await database.all(
+        'SELECT * FROM solana_slots WHERE slot >= ? AND slot <= ? ORDER BY slot',
+        [startSlot, endSlot]
+      );
+      return rows;
+    } catch (error) {
+      logger.error('批量获取槽位失败', { startSlot, endSlot, error });
+      throw error;
+    }
+  }
+
   /**
    * 获取最后扫描的槽位
    */
-  async getLastScannedSlot(): Promise<number | null> {
+  async getLastScannedSlot(startSlot: number = 0): Promise<number | null> {
     try {
-      const row = await database.get(
-        'SELECT MAX(slot) as max_slot FROM solana_slots WHERE status != "skipped"'
+      const rows = await database.all(
+        'SELECT slot FROM solana_slots WHERE slot >= ? ORDER BY slot ASC',
+        [startSlot]
       );
-      return row?.max_slot || null;
+
+      if (rows.length === 0) {
+        return null;
+      }
+
+      let expectedSlot = startSlot;
+      let lastContinuousSlot: number | null = null;
+      for (const row of rows) {
+        if (row.slot !== expectedSlot) {
+          break;
+        }
+        lastContinuousSlot = row.slot;
+        expectedSlot++;
+      }
+
+      return lastContinuousSlot;
     } catch (error) {
       logger.error('获取最后扫描槽位失败', { error });
       throw error;
@@ -214,6 +243,19 @@ export class WalletDAO {
     }
   }
 
+  async getAllSolanaWallets(): Promise<Wallet[]> {
+    try {
+      const rows = await database.all(
+        'SELECT * FROM wallets WHERE chain_type = ? AND is_active = 1',
+        ['solana']
+      );
+      return rows;
+    } catch (error) {
+      logger.error('获取所有Solana钱包失败', { error });
+      throw error;
+    }
+  }
+
   /**
    * 根据地址获取钱包信息
    */
@@ -328,12 +370,50 @@ export class SolanaTokenAccountDAO {
   }
 }
 
+export class FundTaskDAO {
+  /**
+   * fund_rebalance 发出的 Solana 归集和手续费补给都是平台内部资金调度；
+   * scanner 看到这些交易转入热钱包或用户地址时，不能再按用户充值写 deposit。
+   */
+  async getInternalTransferTaskByTxHash(txHash: string): Promise<{
+    id: number;
+    status: string;
+    tx_hash?: string | null;
+    metadata?: string | null;
+  } | null> {
+    try {
+      const rows = await database.all(
+        'SELECT id, status, tx_hash, metadata FROM fund_tasks WHERE chain_type = ?',
+        ['solana']
+      );
+      const normalized = txHash.toLowerCase();
+
+      return rows.find(row => {
+        if (String(row.tx_hash || '').toLowerCase() === normalized) {
+          return true;
+        }
+
+        try {
+          const metadata = JSON.parse(row.metadata || '{}');
+          return String(metadata.gasFundingTxHash || '').toLowerCase() === normalized;
+        } catch {
+          return false;
+        }
+      }) || null;
+    } catch (error) {
+      logger.error('查询 Solana 归集内部交易失败', { txHash, error });
+      throw error;
+    }
+  }
+}
+
 // 导出DAO实例
 export const solanaSlotDAO = new SolanaSlotDAO();
 export const solanaTransactionDAO = new SolanaTransactionDAO();
 export const walletDAO = new WalletDAO();
 export const tokenDAO = new TokenDAO();
 export const solanaTokenAccountDAO = new SolanaTokenAccountDAO();
+export const fundTaskDAO = new FundTaskDAO();
 
 // 导出数据库实例
 export { database } from './connection';

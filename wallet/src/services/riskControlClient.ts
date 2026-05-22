@@ -35,6 +35,9 @@ export interface TransactionSignRequest {
     from: string;
     to: string;
     amount: string;
+    userId?: number;
+    tokenId?: number;
+    tokenSymbol?: string;
     tokenAddress?: string;
     tokenType?: string;
     chainId: number;

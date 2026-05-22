@@ -33,7 +33,7 @@ export class WithdrawMonitor {
     }
 
     try {
-      logger.info('启动提现监控服务...');
+      logger.debug('启动提现监控服务...');
       this.isRunning = true;
       
       // 立即执行一次监控
@@ -48,7 +48,7 @@ export class WithdrawMonitor {
         }
       }, config.scanInterval * 1000); // 将秒转换为毫秒
       
-      logger.info('提现监控服务启动成功', {
+      logger.debug('提现监控服务启动成功', {
         monitorInterval: config.scanInterval * 1000,
         maxRetryCount: this.MAX_RETRY_COUNT
       });
@@ -67,7 +67,7 @@ export class WithdrawMonitor {
       return;
     }
 
-    logger.info('停止提现监控服务...');
+    logger.debug('停止提现监控服务...');
     
     if (this.monitorInterval) {
       clearInterval(this.monitorInterval);
@@ -75,7 +75,7 @@ export class WithdrawMonitor {
     }
     
     this.isRunning = false;
-    logger.info('提现监控服务已停止');
+    logger.debug('提现监控服务已停止');
   }
 
   /**
@@ -111,6 +111,7 @@ export class WithdrawMonitor {
           w.chain_type,
           w.from_address,
           w.to_address,
+          w.nonce,
           w.created_at,
           t.token_symbol,
           t.token_address,
@@ -213,7 +214,7 @@ export class WithdrawMonitor {
     const { 
       id, tx_hash, chain_id, user_id, token_id, amount, fee, 
       token_symbol, token_address, decimals, is_native,
-      from_address, to_address 
+      from_address, to_address, nonce
     } = withdraw;
     
     try {
@@ -232,13 +233,15 @@ export class WithdrawMonitor {
       const receipt = await viemClient.getTransactionReceipt(tx_hash);
 
       if (!receipt) {
-        logger.debug('交易收据未找到', { txHash: tx_hash, withdrawId: id });
+        await this.logNonceBlockedDiagnostic(withdraw);
+        logger.debug('交易收据未找到，提现保持 pending 等待态', { txHash: tx_hash, withdrawId: id });
         return;
       }
 
       // 检查交易状态
       const isSuccess = receipt.status === 'success';
       const gasUsed = receipt.gasUsed.toString();
+      const effectiveGasPrice = receipt.effectiveGasPrice?.toString();
       const blockNumber = Number(receipt.blockNumber);
 
       logger.info('获取到交易收据', {
@@ -246,7 +249,8 @@ export class WithdrawMonitor {
         txHash: tx_hash,
         status: receipt.status,
         blockNumber: blockNumber,
-        gasUsed: gasUsed
+        gasUsed: gasUsed,
+        effectiveGasPrice
       });
 
       if (isSuccess) {
@@ -259,6 +263,9 @@ export class WithdrawMonitor {
 
         // 更新 credits 表状态
         await this.updateCreditStatus(id, 'confirmed', blockNumber);
+
+        // 记录热钱包实际链上 gas 成本。withdraws.fee 是业务提现手续费，不等同于链上 gas。
+        await this.createNetworkFeeCredit(withdraw, receipt, blockNumber);
 
         // 创建 transactions 表记录（用于 scan 服务的统一管理）
         await this.createTransactionRecord({
@@ -304,6 +311,7 @@ export class WithdrawMonitor {
       // 检查是否是交易未找到错误（可能还在内存池中）
       if (error.message?.includes('Transaction not found') || 
           error.message?.includes('not found')) {
+        await this.logNonceBlockedDiagnostic(withdraw);
         logger.debug('交易还在内存池中，继续等待', {
           withdrawId: id,
           txHash: tx_hash
@@ -319,6 +327,38 @@ export class WithdrawMonitor {
 
       // 如果是网络错误等临时问题，不做处理，等待下次重试
       // 如果需要，可以增加重试计数器逻辑
+    }
+  }
+
+  private async logNonceBlockedDiagnostic(withdraw: any): Promise<void> {
+    const { id, tx_hash, from_address, nonce } = withdraw;
+    if (!from_address || nonce === null || nonce === undefined) {
+      return;
+    }
+
+    try {
+      const tx = await viemClient.getTransaction(tx_hash);
+      if (tx) {
+        return;
+      }
+
+      const chainPendingNonce = await viemClient.getPendingNonce(from_address);
+      const withdrawNonce = Number(nonce);
+      if (chainPendingNonce < withdrawNonce) {
+        logger.warn('nonce_blocked: 提现交易链上不可见且低 nonce 尚未收口', {
+          withdrawId: id,
+          txHash: tx_hash,
+          fromAddress: from_address,
+          withdrawNonce,
+          chainPendingNonce
+        });
+      }
+    } catch (error) {
+      logger.debug('nonce_blocked 诊断暂不可用', {
+        withdrawId: id,
+        txHash: tx_hash,
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 
@@ -507,6 +547,108 @@ export class WithdrawMonitor {
       type: data.type,
       status: data.status
     });
+  }
+
+  /**
+   * 创建热钱包链上 gas 成本流水
+   */
+  private async createNetworkFeeCredit(withdraw: any, receipt: TransactionReceipt, blockNumber: number): Promise<void> {
+    try {
+      if (!withdraw.from_address) {
+        logger.warn('提现缺少热钱包地址，跳过 gas fee 记账', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash
+        });
+        return;
+      }
+
+      if (!receipt.effectiveGasPrice) {
+        logger.warn('交易收据缺少 effectiveGasPrice，跳过 gas fee 记账', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash,
+          gasUsed: receipt.gasUsed.toString()
+        });
+        return;
+      }
+
+      const gasFeeAmount = receipt.gasUsed * receipt.effectiveGasPrice;
+      if (gasFeeAmount <= 0n) {
+        logger.debug('gas fee 为 0，跳过 gas fee 记账', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash
+        });
+        return;
+      }
+
+      const hotWallet = await this.database.get(
+        'SELECT user_id, address FROM wallets WHERE LOWER(address) = LOWER(?) AND chain_type = ? AND wallet_type = ? LIMIT 1',
+        [withdraw.from_address, 'evm', 'hot']
+      );
+
+      if (!hotWallet?.user_id) {
+        logger.warn('未找到提现热钱包用户，跳过 gas fee 记账', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash,
+          fromAddress: withdraw.from_address
+        });
+        return;
+      }
+
+      const nativeToken = await this.database.get(
+        'SELECT id, token_symbol FROM tokens WHERE chain_type = ? AND chain_id = ? AND is_native = 1 AND status = 1 LIMIT 1',
+        ['evm', withdraw.chain_id]
+      );
+
+      if (!nativeToken) {
+        logger.warn('未找到当前链原生代币，跳过 gas fee 记账', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash,
+          chainId: withdraw.chain_id
+        });
+        return;
+      }
+
+      const creditId = await this.dbGatewayClient.createCredit({
+        user_id: hotWallet.user_id,
+        address: hotWallet.address,
+        token_id: nativeToken.id,
+        token_symbol: nativeToken.token_symbol,
+        amount: `-${gasFeeAmount.toString()}`,
+        credit_type: 'network_fee',
+        business_type: 'withdraw',
+        reference_id: withdraw.id,
+        reference_type: 'withdraw_network_fee',
+        chain_id: withdraw.chain_id,
+        chain_type: withdraw.chain_type,
+        status: 'confirmed',
+        block_number: blockNumber,
+        tx_hash: withdraw.tx_hash,
+        event_index: 0,
+        metadata: {
+          withdraw_id: withdraw.id,
+          gas_used: receipt.gasUsed.toString(),
+          effective_gas_price: receipt.effectiveGasPrice.toString(),
+          fee_token_symbol: nativeToken.token_symbol
+        }
+      });
+
+      if (creditId) {
+        logger.info('热钱包 gas fee 记账完成', {
+          withdrawId: withdraw.id,
+          txHash: withdraw.tx_hash,
+          hotWallet: hotWallet.address,
+          tokenSymbol: nativeToken.token_symbol,
+          gasFeeAmount: gasFeeAmount.toString(),
+          creditId
+        });
+      }
+    } catch (error) {
+      logger.error('创建热钱包 gas fee 流水失败', {
+        withdrawId: withdraw.id,
+        txHash: withdraw.tx_hash,
+        error
+      });
+    }
   }
 
 

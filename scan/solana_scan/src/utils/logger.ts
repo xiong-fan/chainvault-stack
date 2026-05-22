@@ -12,7 +12,12 @@ function bigIntReplacer(key: string, value: any): any {
 // 安全的 JSON 序列化函数，支持 BigInt
 function safeStringify(obj: any, space?: number): string {
   try {
-    return JSON.stringify(obj, bigIntReplacer, space);
+    const value = JSON.stringify(obj, bigIntReplacer, space);
+    const maxLength = parseInt(process.env.LOG_META_MAX_LENGTH || '2000', 10);
+    if (value.length > maxLength) {
+      return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`;
+    }
+    return value;
   } catch (error) {
     // 如果还是失败，返回简化的错误信息
     return JSON.stringify({ error: 'Failed to stringify object', type: typeof obj }, null, space);
@@ -69,6 +74,7 @@ const logger = winston.createLogger({
     // 所有日志文件
     new winston.transports.File({
       filename: 'logs/combined.log',
+      level: process.env.LOG_FILE_LEVEL || 'warn',
       maxsize: 5242880, // 5MB
       maxFiles: 5
     })

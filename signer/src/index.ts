@@ -1,4 +1,5 @@
-import 'dotenv/config';
+// import 'dotenv/config';
+import './loadEnv';  // 加载 .env 环境变量
 import express, { Request, Response } from 'express';
 import { AddressService } from './services/addressService';
 import { createSignerRoutes } from './routes/signer';

@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/wallet/tests/readme
+---
+
 # 钱包API测试套件
 
 这个测试套件用于测试CEX钱包系统的API功能，包括钱包的创建、查询、更新等操作。

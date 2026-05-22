@@ -1,3 +1,9 @@
+---
+title: README
+type: note
+permalink: cex-wallet/wallet/readme
+---
+
 # CEX钱包系统 - 主模块
 
 CEX钱包系统的主模块，提供钱包管理 API：
@@ -114,5 +120,3 @@ curl http://localhost:3000/api/user/withdraw/123
 # 查询用户余额（如果拒绝）
 curl  http://localhost:3000/api/user/balance
 ```
-
-

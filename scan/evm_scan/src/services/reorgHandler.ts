@@ -38,7 +38,7 @@ export class ReorgHandler {
       // 3. 回滚到共同祖先
       const reorgInfo = await this.rollbackToCommonAncestor(commonAncestor, currentBlock);
 
-      logger.info('区块链重组处理完成', reorgInfo);
+      logger.warn('区块链重组处理完成', reorgInfo);
       return reorgInfo;
 
     } catch (error) {
@@ -131,9 +131,9 @@ export class ReorgHandler {
   /**
    * 2. 寻找共同祖先区块
    */
-  private async findCommonAncestor(startBlock: number): Promise<number> {
+  private async findCommonAncestorOld(startBlock: number): Promise<number> {
     try {
-      logger.info('开始寻找共同祖先区块', { startBlock });
+      logger.warn('开始寻找共同祖先区块', { startBlock });
 
       // 从当前区块向前搜索，直到找到数据库和链上哈希匹配的区块
       for (let blockNumber = startBlock; blockNumber > 0; blockNumber--) {
@@ -141,7 +141,7 @@ export class ReorgHandler {
         const chainBlock = await viemClient.getBlock(blockNumber);
 
         if (dbBlock && chainBlock && dbBlock.hash === chainBlock.hash) {
-          logger.info('找到共同祖先区块', {
+          logger.warn('找到共同祖先区块', {
             blockNumber,
             hash: dbBlock.hash
           });
@@ -160,11 +160,77 @@ export class ReorgHandler {
   }
 
   /**
+ * 改进版：寻找共同祖先区块
+ * 增加固定深度检查，避免在混合链状态下漏掉早期重组
+ */
+  private async findCommonAncestor(startBlock: number): Promise<number> {
+    try {
+      logger.warn('开始寻找共同祖先区块', { 
+        startBlock,
+        reorgCheckDepth: config.reorgCheckDepth 
+      });
+
+      const checkDepth = Math.min(config.reorgCheckDepth || 32, startBlock - 1);
+      let deepestMismatch = -1;   // 记录最远的（最小的）不一致区块号
+
+      for (let i = 0; i <= checkDepth; i++) {
+        const blockNumber = startBlock - i;
+
+        if (blockNumber <= 0) break;
+
+        const dbBlock = await blockDAO.getBlockByNumber(blockNumber);
+        const chainBlock = await viemClient.getBlock(blockNumber);
+
+        if (dbBlock && chainBlock) {
+          if (dbBlock.hash !== chainBlock.hash) {
+            // 发现哈希不一致，记录这个区块号（我们想要最小的那个）
+            if (deepestMismatch === -1 || blockNumber < deepestMismatch) {
+              deepestMismatch = blockNumber;
+            }
+            logger.debug('发现哈希不一致', { 
+              blockNumber, 
+              dbHash: dbBlock.hash?.substring(0, 10) + '...',
+              chainHash: chainBlock.hash?.substring(0, 10) + '...' 
+            });
+          }
+        } else if (dbBlock) {
+          // 链上没有但数据库有，也视为不一致
+          if (deepestMismatch === -1 || blockNumber < deepestMismatch) {
+            deepestMismatch = blockNumber;
+          }
+        }
+      }
+
+      // 如果找到了不一致的区块
+      if (deepestMismatch !== -1) {
+        const commonAncestor = deepestMismatch - 1;   // 不一致区块的前一个就是共同祖先
+        logger.warn('找到共同祖先（通过深度不一致检查）', {
+          commonAncestor,
+          deepestMismatch,
+          startBlock,
+          checkDepth
+        });
+        return Math.max(commonAncestor, config.startBlock - 1);
+      }
+
+      // 如果在检查深度内全部匹配，认为是安全的
+      logger.debug('在检查深度内未发现重组，视为共同祖先', { 
+        commonAncestor: startBlock 
+      });
+      return startBlock;
+
+    } catch (error) {
+      logger.error('寻找共同祖先失败', { startBlock, error });
+      throw error;
+    }
+  }
+
+  /**
    * 3. 回滚到共同祖先
    */
   private async rollbackToCommonAncestor(commonAncestor: number, currentBlock: number): Promise<ReorgInfo> {
     try {
-      logger.info('开始回滚到共同祖先', {
+      logger.warn('开始回滚到共同祖先', {
         commonAncestor,
         currentBlock,
         blocksToRollback: currentBlock - commonAncestor
@@ -179,7 +245,7 @@ export class ReorgHandler {
         currentBlock
       );
       
-      logger.info('重组回滚Credit记录', {
+      logger.warn('重组回滚Credit记录', {
         startBlock: commonAncestor + 1,
         endBlock: currentBlock,
         deletedCredits
@@ -202,7 +268,7 @@ export class ReorgHandler {
         blocksToRescan: currentBlock - commonAncestor
       };
 
-      logger.info('回滚完成', reorgInfo);
+      logger.warn('回滚完成', reorgInfo);
       return reorgInfo;
 
     } catch (error) {
@@ -251,7 +317,7 @@ export class ReorgHandler {
       const rollbackableTransactions = await this.getRollbackableTransactions(dbBlock.hash);
 
       if (rollbackableTransactions.length === 0) {
-        logger.info('该区块没有可回滚的交易', { blockNumber, blockHash: dbBlock.hash });
+        logger.debug('该区块没有可回滚的交易', { blockNumber, blockHash: dbBlock.hash });
         // 即使没有可回滚的交易，仍然标记区块为孤块
         await this.dbGatewayClient.updateBlockStatus(dbBlock.hash, 'orphaned');
         return {
@@ -269,7 +335,7 @@ export class ReorgHandler {
         }
       }
 
-      logger.info('回滚交易完成', {
+      logger.warn('回滚交易完成', {
         blockNumber,
         blockHash: dbBlock.hash,
         totalTransactions: rollbackableTransactions.length,

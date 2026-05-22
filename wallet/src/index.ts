@@ -1,8 +1,10 @@
-import 'dotenv/config';
+// import 'dotenv/config';
+import './loadEnv';  // 加载 .env 环境变量
 import express, { Request, Response } from 'express';
 import { initDatabaseService, getDatabaseService } from './db';
 import { walletRoutes } from './routes/wallet';
 import { internalRoutes } from './routes/internal';
+import { authRoutes } from './routes/auth';
 
 // API响应接口
 interface ApiResponse<T = any> {
@@ -14,8 +16,30 @@ interface ApiResponse<T = any> {
 
 const app = express();
 const PORT: number = parseInt(process.env.PORT || '3000', 10);
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3009,http://127.0.0.1:3009')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 // 中间件
+app.use((req: Request, res: Response, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
+
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.header('Access-Control-Max-Age', '86400');
+
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+
+  next();
+});
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -65,6 +89,9 @@ app.get('/health', (req: Request, res: Response) => {
 
 // 设置路由
 function setupRoutes() {
+  // 账号认证路由
+  app.use('/api/auth', authRoutes(dbService));
+
   // 钱包路由
   app.use('/api', walletRoutes(dbService));
 

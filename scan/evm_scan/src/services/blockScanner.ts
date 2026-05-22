@@ -39,7 +39,7 @@ export class BlockScanner {
     // 初始化确认管理器
     await confirmationManager.initialize();
     
-    logger.info('启动区块扫描器', {
+    logger.debug('启动区块扫描器', {
       startBlock: config.startBlock,
       batchSize: config.scanBatchSize,
       confirmationBlocks: config.confirmationBlocks,
@@ -73,14 +73,14 @@ export class BlockScanner {
       clearInterval(this.intervalTimer);
       this.intervalTimer = null;
     }
-    logger.info('区块扫描器已停止');
+    logger.debug('区块扫描器已停止');
   }
 
   /**
    * 执行初始同步扫描
    */
   private async performInitialSync(): Promise<void> {
-    logger.info('开始初始同步扫描...');
+    logger.debug('开始初始同步扫描...');
 
     // 获取当前最新区块
     let latestBlockNumber = await viemClient.getLatestBlockNumber();
@@ -89,7 +89,7 @@ export class BlockScanner {
     const lastScannedBlock = await this.getLastScannedBlock();
     let currentBlock = lastScannedBlock + 1;
     
-    logger.info('同步扫描状态', {
+    logger.debug('同步扫描状态', {
       startFromBlock: currentBlock,
       latestBlock: latestBlockNumber,
       blocksToSync: latestBlockNumber - currentBlock + 1
@@ -99,7 +99,7 @@ export class BlockScanner {
     while (currentBlock <= latestBlockNumber && this.isScanning) {
       const endBlock = Math.min(currentBlock + config.scanBatchSize - 1, latestBlockNumber);
       
-      logger.info('扫描批次', {
+      logger.debug('扫描批次', {
         startBlock: currentBlock,
         endBlock: endBlock,
         batchSize: endBlock - currentBlock + 1,
@@ -115,7 +115,7 @@ export class BlockScanner {
         // 检查是否有新的区块产生
         const newLatestBlock = await viemClient.getLatestBlockNumber();
         if (newLatestBlock > latestBlockNumber) {
-          logger.info('检测到新区块', {
+          logger.debug('检测到新区块', {
             oldLatest: latestBlockNumber,
             newLatest: newLatestBlock
           });
@@ -132,7 +132,7 @@ export class BlockScanner {
       }
     }
 
-    logger.info('初始同步扫描完成', {
+    logger.debug('初始同步扫描完成', {
       lastScannedBlock: currentBlock - 1,
       latestBlock: latestBlockNumber
     });
@@ -211,7 +211,7 @@ export class BlockScanner {
         const rescanStart = reorgInfo.commonAncestor + 1;
         const rescanEnd = endBlock;
         
-        logger.info('重组处理：重新扫描区块范围', { rescanStart, rescanEnd });
+        logger.warn('重组处理：重新扫描区块范围', { rescanStart, rescanEnd });
         
         for (let rescanBlock = rescanStart; rescanBlock <= rescanEnd; rescanBlock++) {
           
@@ -268,7 +268,7 @@ export class BlockScanner {
    */
   private async scanBlockBatchHistorical(startBlock: number, endBlock: number): Promise<void> {
     try {
-      logger.info('使用历史分析模式扫描 finalized 区块', { 
+      logger.debug('使用历史分析模式扫描 finalized 区块', { 
         startBlock, 
         endBlock,
         reason: 'endBlock已finalized，使用最优策略'
@@ -308,7 +308,7 @@ export class BlockScanner {
       // 3. 最后处理确认
       await confirmationManager.processConfirmations();
 
-      logger.info('历史分析模式扫描完成', {
+      logger.debug('历史分析模式扫描完成', {
         startBlock,
         endBlock,
         blocksProcessed: blocks.length
@@ -423,7 +423,7 @@ export class BlockScanner {
    * 启动定时扫描
    */
   private startIntervalScanning(): void {
-    logger.info('启动定时扫描', { interval: config.scanInterval });
+    logger.debug('启动定时扫描', { interval: config.scanInterval });
 
     this.intervalTimer = setInterval(async () => {
       if (!this.isScanning) {
@@ -445,12 +445,11 @@ export class BlockScanner {
     try {
       const latestBlockNumber = await viemClient.getLatestBlockNumber();
       const lastScannedBlock = await this.getLastScannedBlock();
-      
       if (latestBlockNumber > lastScannedBlock) {
         const startBlock = lastScannedBlock + 1;
         const endBlock = Math.min(startBlock + config.scanBatchSize - 1, latestBlockNumber);
 
-        logger.info('定时扫描新区块', {
+        logger.debug('定时扫描新区块', {
           startBlock,
           endBlock,
           newBlocks: endBlock - startBlock + 1
@@ -475,11 +474,11 @@ export class BlockScanner {
         'SELECT MAX(CAST(number AS INTEGER)) as max_number FROM blocks WHERE status = "confirmed"'
       );
       
-      if (lastBlock && lastBlock.max_number !== null) {
+      if (lastBlock && lastBlock.max_number !== null && lastBlock.max_number >= config.startBlock) {
         return lastBlock.max_number;
       }
       
-      // 如果没有扫描过任何区块，返回配置的起始区块减一
+      // 如果没有扫描过任何区块或配置的起始区块号大于最后扫描的区块号，返回配置的起始区块减一
       return config.startBlock - 1;
       
     } catch (error) {

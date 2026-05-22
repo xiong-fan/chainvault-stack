@@ -100,6 +100,65 @@ export class GasEstimationService {
     }
   }
 
+  /**
+   * 使用真实 EVM 交易参数估算 gas limit，并保留费用估算逻辑。
+   */
+  async estimateEvmTransferGas(params: {
+    chainId: number;
+    from: string;
+    to: string;
+    amount: string;
+    tokenAddress?: string | null;
+    tokenType?: string | null;
+    fallbackGasLimit?: bigint;
+  }): Promise<GasEstimation> {
+    const chain = this.getChainTypeFromChainId(params.chainId);
+    const isTokenTransfer = Boolean(params.tokenAddress);
+    const fallbackGasLimit = params.fallbackGasLimit ?? (isTokenTransfer ? 100000n : 50000n);
+
+    let gasLimit = fallbackGasLimit;
+
+    try {
+      const publicClient = this.getPublicClient(chain);
+      const tx: Record<string, unknown> = {
+        account: params.from as `0x${string}`,
+        to: (params.tokenAddress || params.to) as `0x${string}`
+      };
+
+      if (isTokenTransfer) {
+        tx.value = 0n;
+        tx.data = this.encodeERC20Transfer(params.to, params.amount);
+      } else {
+        tx.value = BigInt(normalizeBigIntString(params.amount));
+      }
+
+      const estimatedGas = await publicClient.estimateGas(tx);
+      gasLimit = this.withGasLimitBuffer(
+        typeof estimatedGas === 'bigint' ? estimatedGas : BigInt(estimatedGas),
+        fallbackGasLimit
+      );
+    } catch (error) {
+      console.warn('真实 EVM gas limit 估算失败，使用保守默认值:', {
+        chainId: params.chainId,
+        from: params.from,
+        to: params.to,
+        tokenAddress: params.tokenAddress || null,
+        fallbackGasLimit: fallbackGasLimit.toString(),
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    return this.estimateGas({
+      chainId: params.chainId,
+      gasLimit
+    });
+  }
+
+  private withGasLimitBuffer(estimatedGas: bigint, minimumGasLimit: bigint): bigint {
+    const buffered = (estimatedGas * 120n + 99n) / 100n;
+    return buffered > minimumGasLimit ? buffered : minimumGasLimit;
+  }
+
 
   /**
    * 从历史数据获取基础费用、gas 价格和优先费用

@@ -66,7 +66,7 @@ export async function signEvmTransaction(
       ? BigInt(request.gas)
       : request.tokenAddress
         ? 100000n
-        : 21000n,
+        : 50000n,
     nonce,
     chainId: request.chainId
   };
@@ -132,9 +132,10 @@ export function deriveEvmAccountFromPath(
   password: string,
   path: string
 ): { address: string; privateKey: HexString } {
-  const seed = mnemonicToSeedSync(mnemonic, password);
-  const hdKey = HDKey.fromMasterSeed(seed);
-  const derivedKey = hdKey.derive(path);
+  const seed = mnemonicToSeedSync(mnemonic, password);   // mnemonicToSeed(mnemonic, passphrase?)  MetaMask 通常 passphrase 留空
+  const hdKey = HDKey.fromMasterSeed(seed);  // 生成 Master Key（根密钥）
+  const derivedKey = hdKey.derive(path); // 通过不同 Derivation Path 派生子密钥
+
 
   if (!derivedKey.privateKey) {
     throw new Error('无法派生私钥');
