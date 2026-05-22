@@ -26,6 +26,7 @@ permalink: cex-wallet/readme
   - solana_scan: 扫描 Solana 链
 - **risk_control**: 风控模块
 - **fund_rebalance**: 资金调度模块
+- **user-frontend**: 前端模块（包含后台操作页面）
 
 
 ## 文档
